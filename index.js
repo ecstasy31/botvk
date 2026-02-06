@@ -2,13 +2,13 @@ import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import http from "http";
 
-const TARGET_PEER_ID = 2000000086; // Проверь, что этот ID правильный!
+// Проверь этот ID! Он должен быть равен (2000000000 + ID беседы)
+const TARGET_PEER_ID = 2000000086; 
 
-// Инициализация
 const vk = new VK({
   token: process.env.VK_TOKEN,
   apiVersion: "5.199",
-  pollingGroupId: Number(process.env.VK_GROUP_ID)
+  pollingGroupId: Number(process.env.VK_GROUP_ID) 
 });
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
@@ -18,22 +18,15 @@ admin.initializeApp({
 });
 const db = admin.database();
 
-// Метка времени старта, чтобы не спамить старыми отчетами при перезагрузке
-// Но делаем запас побольше (1 час), на случай расхождений часов
-const BOT_START_TIME = Date.now() - (60 * 60 * 1000); 
-
 console.log("🚀 Бот запускается...");
 
 // --- КОМАНДЫ ---
 vk.updates.on('message_new', async (ctx) => {
     if (!ctx.text || ctx.isOutbox) return;
     
-    if (ctx.text === '/start') {
+    // Проверка, что бот вообще видит сообщения в беседе
+    if (ctx.text === '/start' || ctx.text === '/id') {
         return ctx.send(`✅ Бот тут!\nID этого чата: ${ctx.peerId}\nЦелевой ID: ${TARGET_PEER_ID}`);
-    }
-
-    if (ctx.text === '!test') {
-        return ctx.send("🟢 Тест пройден. Бот работает.");
     }
 });
 
@@ -53,9 +46,9 @@ vk.updates.on("message_event", async (ctx) => {
         const isOk = action === "ok";
 
         if (isOk) {
-            // Начисляем именно столько баллов, сколько посчитал сайт (report.score)
-            // Если score не указан (старый отчет), даем 1 балл по умолчанию
-            const pointsToAdd = report.score || 1;
+            // Начисляем баллы (автоматически при нажатии кнопки)
+            // Берем report.score, который посчитал сайт (равен кол-ву наказаний)
+            const pointsToAdd = parseInt(report.score) || 0;
             await db.ref(`users/${report.author}/score`).transaction(s => (s || 0) + pointsToAdd);
         }
 
@@ -82,12 +75,9 @@ db.ref("reports").on("child_added", async (snap) => {
     const report = snap.val();
     const reportId = snap.key;
 
+    // Главная проверка: если у отчета уже есть ID сообщения ВК, значит мы его уже отправляли
+    // Если нет - отправляем
     if (!report || report.vkMessageId) return;
-
-    // Если у отчета вообще нет метки времени (старый) или она очень старая - игнор
-    if (report.timestamp && report.timestamp < BOT_START_TIME) {
-        return;
-    }
 
     console.log(`📩 Отчет от ${report.author}. Попытка отправки...`);
 
@@ -100,7 +90,7 @@ db.ref("reports").on("child_added", async (snap) => {
 
         const sent = await vk.api.messages.send({
             peer_id: TARGET_PEER_ID,
-            random_id: Date.now(), // Обязательно для бесед
+            random_id: Date.now(), // Обязательный параметр для бесед
             message: text,
             keyboard
         });
@@ -116,7 +106,7 @@ db.ref("reports").on("child_added", async (snap) => {
     }
 });
 
-// Запуск
+// Запуск бота
 vk.updates.start()
     .then(() => console.log("✅ Polling started"))
     .catch(console.error);
