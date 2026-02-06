@@ -140,20 +140,11 @@ vk.updates.on("message_event", async (ctx) => {
             if (messages.items && messages.items[0]) {
                 const currentMessage = messages.items[0];
                 
-                // СОБИРАЕМ ВСЕ ATTACHMENT (до 10 фото)
+                // СОБИРАЕМ ВСЕ ATTACHMENT
                 const currentAttachments = currentMessage.attachments || [];
                 const attachmentStrings = currentAttachments.map(att => {
                     if (att.type === 'photo' && att.photo) {
-                        // Форматируем photo attachment правильно
-                        // Используем photo с наибольшим размером (обычно это 's' размер)
-                        const photo = att.photo;
-                        const sizes = photo.sizes || [];
-                        const largestSize = sizes.reduce((max, size) => 
-                            (size.width * size.height) > (max.width * max.height) ? size : max
-                        );
-                        
-                        // Возвращаем строку в формате photo{owner_id}_{id}_{access_key}
-                        return `photo${photo.owner_id}_${photo.id}${photo.access_key ? `_${photo.access_key}` : ''}`;
+                        return `photo${att.photo.owner_id}_${att.photo.id}${att.photo.access_key ? `_${att.photo.access_key}` : ''}`;
                     }
                     return null;
                 }).filter(Boolean);
@@ -165,7 +156,7 @@ vk.updates.on("message_event", async (ctx) => {
                     peer_id: ctx.peerId,
                     conversation_message_id: ctx.conversationMessageId,
                     message: newText,
-                    attachment: attachmentStrings.join(','), // Сохраняем все фото
+                    attachment: attachmentStrings.join(','),
                     keyboard: Keyboard.builder().inline().toString()
                 });
                 
@@ -196,7 +187,6 @@ vk.updates.on("message_event", async (ctx) => {
         } catch (editError) {
             console.error("Ошибка при редактировании:", editError);
             
-            // Запасной вариант: редактируем без attachment
             await vk.api.messages.edit({
                 peer_id: ctx.peerId,
                 conversation_message_id: ctx.conversationMessageId,
@@ -338,7 +328,7 @@ async function processNewUser(userId, userData) {
 }
 
 // =======================
-// ОБРАБОТКА НОВЫХ ОТЧЕТОВ (до 10 фото)
+// ОБРАБОТКА НОВЫХ ОТЧЕТОВ (ИСПРАВЛЕНО - не кидает отдельные сообщения)
 // =======================
 
 db.ref("reports").on("child_added", async (snap) => {
@@ -354,8 +344,15 @@ db.ref("reports").on("child_added", async (snap) => {
     
     existingReports.add(reportId);
     
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: проверяем, не это ли сообщение с фотографиями
     if (report.vkMessageId || report.botProcessed) {
         console.log(`[REPORT] Отчет ${reportId} уже был обработан`);
+        return;
+    }
+    
+    // Дополнительная проверка: если в отчете нет основных данных, это вероятно сообщение с фото
+    if (!report.author && !report.work && !report.score) {
+        console.log(`[REPORT] Пропускаем отчет ${reportId} - вероятно, это сообщение с фото`);
         return;
     }
     
@@ -371,6 +368,12 @@ async function processNewReport(reportId, report) {
             return;
         }
 
+        // Проверяем, валидный ли это отчет
+        if (!report.author || !report.date) {
+            console.log(`[REPORT] Пропускаем некорректный отчет ${reportId}: отсутствуют обязательные поля`);
+            return;
+        }
+
         const text = 
             `📝 НОВЫЙ ОТЧЕТ\n\n` +
             `👤 Ник: ${report.author || "—"}\n` +
@@ -382,7 +385,7 @@ async function processNewReport(reportId, report) {
         
         const attachments = [];
         
-        // Обрабатываем до 10 фотографий
+        // Обрабатываем фотографии ТОЛЬКО если их не больше 10
         if (report.imgs && Array.isArray(report.imgs)) {
             console.log(`[PHOTO] Найдено ${report.imgs.length} фото для отчета ${reportId}`);
             
@@ -400,7 +403,7 @@ async function processNewReport(reportId, report) {
                         const mimeMatch = imgData.match(/^data:(image\/\w+);base64,/);
                         const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
                         
-                        console.log(`[PHOTO ${i+1}/${maxPhotos}] Загружаю фото ${i+1} для отчета ${reportId}`);
+                        console.log(`[PHOTO ${i+1}/${maxPhotos}] Загружаю фото для отчета ${reportId}`);
                         
                         const photo = await vk.upload.messagePhoto({
                             source: {
@@ -412,25 +415,13 @@ async function processNewReport(reportId, report) {
                         });
                         
                         attachments.push(photo.toString());
-                        console.log(`[PHOTO ${i+1}/${maxPhotos}] Успешно загружено`);
                         
                     } catch (error) {
                         console.error(`[PHOTO ${i+1}/${maxPhotos}] Ошибка:`, error.message);
                     }
-                } else if (typeof imgData === 'string' && (imgData.startsWith('http://') || imgData.startsWith('https://'))) {
-                    try {
-                        console.log(`[PHOTO ${i+1}/${maxPhotos}] Загружаю фото по URL для отчета ${reportId}`);
-                        const uploaded = await uploadImageToVK(imgData, peerId);
-                        if (uploaded) {
-                            attachments.push(uploaded);
-                            console.log(`[PHOTO ${i+1}/${maxPhotos}] Успешно загружено из URL`);
-                        }
-                    } catch (error) {
-                        console.error(`[PHOTO ${i+1}/${maxPhotos}] Ошибка загрузки URL:`, error.message);
-                    }
                 }
                 
-                // Небольшая задержка между загрузками, чтобы не перегружать API
+                // Небольшая задержка между загрузками
                 if (i < maxPhotos - 1) {
                     await new Promise(resolve => setTimeout(resolve, 300));
                 }
@@ -438,11 +429,6 @@ async function processNewReport(reportId, report) {
         }
         
         console.log(`[REPORT] Всего загружено фото для отчета ${reportId}: ${attachments.length}`);
-        
-        // Проверяем, есть ли фотографии
-        if (attachments.length === 0) {
-            console.log(`[REPORT] Для отчета ${reportId} нет фотографий`);
-        }
         
         const keyboard = Keyboard.builder()
             .inline()
@@ -459,6 +445,7 @@ async function processNewReport(reportId, report) {
             .toString();
         
         try {
+            // Отправляем ВСЕ в одном сообщении: текст + фото + кнопки
             const msgId = await vk.api.messages.send({
                 peer_id: Number(peerId),
                 random_id: Math.floor(Math.random() * 2000000000),
@@ -467,9 +454,9 @@ async function processNewReport(reportId, report) {
                 keyboard: keyboard
             });
             
-            console.log(`✅ Отчет ${reportId} отправлен с ${attachments.length} фото`);
+            console.log(`✅ Отчет ${reportId} отправлен с ${attachments.length} фото в одном сообщении`);
             
-            // Сохраняем attachment для возможного использования при редактировании
+            // Сохраняем информацию об отчете
             const attachmentString = attachments.length > 0 ? attachments.join(',') : '';
             
             await db.ref(`reports/${reportId}`).update({
@@ -485,14 +472,14 @@ async function processNewReport(reportId, report) {
         } catch (sendError) {
             console.error(`❌ Ошибка отправки отчета ${reportId}:`, sendError);
             
-            // Если ошибка из-за слишком большого количества attachment, пробуем отправить без них
-            if (sendError.code === 914) { // Пример кода ошибки для слишком большого сообщения
-                console.log(`[REPORT] Попытка отправить отчет ${reportId} без фото из-за ограничений VK`);
+            // Если ошибка из-за attachment, пробуем отправить без фото
+            if (sendError.code === 914 || sendError.message.includes('attachment')) {
+                console.log(`[REPORT] Отправляю отчет ${reportId} без фото`);
                 
                 const msgId = await vk.api.messages.send({
                     peer_id: Number(peerId),
                     random_id: Math.floor(Math.random() * 2000000000),
-                    message: text + '\n\n⚠️ Фотографии не были загружены из-за ограничений VK',
+                    message: text + '\n\n⚠️ Фотографии не загружены (превышен лимит)',
                     keyboard: keyboard
                 });
                 
@@ -502,8 +489,7 @@ async function processNewReport(reportId, report) {
                     status: "pending",
                     processedAt: Date.now(),
                     botProcessed: true,
-                    photoCount: 0,
-                    uploadError: "VK attachment limit exceeded"
+                    photoCount: 0
                 });
             }
         }
@@ -514,111 +500,60 @@ async function processNewReport(reportId, report) {
 }
 
 // =======================
-// ДОПОЛНИТЕЛЬНАЯ ФУНКЦИЯ: ПРОВЕРКА И ВОССТАНОВЛЕНИЕ ФОТО
+// ФИЛЬТРАЦИЯ ЛИШНИХ СООБЩЕНИЙ (ЗАЩИТА ОТ СПАМА)
 // =======================
 
-async function checkAndRepairMissingPhotos() {
+// Отключаем функцию восстановления фото, которая создавала отдельные сообщения
+// Вместо нее добавляем проверку на дублирование
+
+setInterval(async () => {
     if (!isBotReady) return;
     
     try {
-        console.log(`[REPAIR] Проверка отчетов с отсутствующими фото...`);
+        console.log(`[CLEANUP] Проверка на дубликаты отчетов...`);
         
-        // Находим отчеты, у которых есть imgs, но photoCount = 0 или отсутствует
-        const reportsSnap = await db.ref("reports").orderByChild("botProcessed").equalTo(true).once("value");
+        // Находим отчеты с одинаковыми данными
+        const reportsSnap = await db.ref("reports").orderByChild("processedAt").once("value");
         const reports = reportsSnap.val() || {};
         
-        let repairedCount = 0;
+        const seenCombinations = new Map(); // Храним комбинации для обнаружения дубликатов
+        const duplicates = [];
         
         for (const [reportId, report] of Object.entries(reports)) {
-            // Проверяем, есть ли фотографии в imgs, но нет в photoCount или photoCount = 0
-            if (report.imgs && Array.isArray(report.imgs) && report.imgs.length > 0) {
-                const photoCount = report.photoCount || 0;
+            if (report.author && report.date) {
+                const key = `${report.author}_${report.date}_${report.work || ''}`;
                 
-                if (photoCount === 0 && !report.uploadError) {
-                    console.log(`[REPAIR] Найден отчет ${reportId} с ${report.imgs.length} фото, но photoCount = 0`);
+                if (seenCombinations.has(key)) {
+                    const originalId = seenCombinations.get(key);
                     
-                    // Пробуем переотправить фотографии
-                    await processMissingPhotos(reportId, report);
-                    repairedCount++;
+                    // Если этот отчет новее оригинального и имеет photoCount, это может быть дубликат с фото
+                    if (report.photoCount > 0 && report.processedAt > reports[originalId].processedAt) {
+                        duplicates.push({ duplicateId: reportId, originalId, key });
+                    }
+                } else {
+                    seenCombinations.set(key, reportId);
                 }
             }
         }
         
-        if (repairedCount > 0) {
-            console.log(`[REPAIR] Восстановлено ${repairedCount} отчетов с фотографиями`);
-        }
-        
-    } catch (error) {
-        console.error(`[REPAIR] Ошибка проверки:`, error);
-    }
-}
-
-async function processMissingPhotos(reportId, report) {
-    try {
-        const peerId = await getChatId();
-        if (!peerId) return;
-        
-        // Пробуем загрузить до 5 фото (меньше для теста)
-        const maxPhotos = Math.min(report.imgs.length, 5);
-        const attachments = [];
-        
-        for (let i = 0; i < maxPhotos; i++) {
-            const imgData = report.imgs[i];
+        if (duplicates.length > 0) {
+            console.log(`[CLEANUP] Найдено ${duplicates.length} возможных дубликатов`);
             
-            if (typeof imgData === 'string' && imgData.startsWith('data:image')) {
-                try {
-                    const base64Data = imgData.replace(/^data:image\/\w+;base64,/, '');
-                    const buffer = Buffer.from(base64Data, 'base64');
-                    
-                    const mimeMatch = imgData.match(/^data:(image\/\w+);base64,/);
-                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
-                    
-                    const photo = await vk.upload.messagePhoto({
-                        source: {
-                            value: buffer,
-                            contentType: mimeType,
-                            filename: `repair_${reportId}_${i}.${mimeType.split('/')[1]}`
-                        },
-                        peer_id: Number(peerId)
-                    });
-                    
-                    attachments.push(photo.toString());
-                    
-                } catch (error) {
-                    console.error(`[REPAIR] Ошибка загрузки фото ${i+1}:`, error.message);
-                }
+            for (const dup of duplicates) {
+                console.log(`[CLEANUP] Дубликат: ${dup.duplicateId} -> ${dup.originalId} (${dup.key})`);
+                
+                // Можно пометить дубликаты для игнорирования
+                await db.ref(`reports/${dup.duplicateId}`).update({
+                    isDuplicate: true,
+                    duplicateOf: dup.originalId
+                });
             }
         }
         
-        if (attachments.length > 0) {
-            // Отправляем фотографии отдельным сообщением
-            await vk.api.messages.send({
-                peer_id: Number(peerId),
-                random_id: Math.floor(Math.random() * 2000000000),
-                message: `📸 Фотографии для отчета ${reportId} (${attachments.length} из ${report.imgs.length})`,
-                attachment: attachments.join(',')
-            });
-            
-            // Обновляем счетчик фото
-            await db.ref(`reports/${reportId}`).update({
-                photoCount: attachments.length,
-                repairedAt: Date.now()
-            });
-            
-            console.log(`[REPAIR] Восстановлено ${attachments.length} фото для отчета ${reportId}`);
-        }
-        
     } catch (error) {
-        console.error(`[REPAIR] Ошибка восстановления фото для ${reportId}:`, error);
+        console.error(`[CLEANUP] Ошибка проверки:`, error);
     }
-}
-
-// Запускаем проверку каждые 30 минут
-setInterval(() => {
-    if (isBotReady) {
-        checkAndRepairMissingPhotos();
-    }
-}, 30 * 60 * 1000);
+}, 10 * 60 * 1000); // Проверка каждые 10 минут
 
 // =======================
 // ЗАПУСК
@@ -631,15 +566,9 @@ async function startBot() {
         
         console.log('🤖 Бот успешно запущен');
         console.log('📊 Команды: /bind, /id, /info [ник]');
-        console.log('📸 Поддержка до 10 фотографий в отчетах');
-        console.log('🔄 Автоматическое восстановление фото каждые 30 минут');
-        
-        // Первая проверка через 5 минут после запуска
-        setTimeout(() => {
-            if (isBotReady) {
-                checkAndRepairMissingPhotos();
-            }
-        }, 5 * 60 * 1000);
+        console.log('⚠️  Исправлено: фото отправляются только в основном сообщении отчета');
+        console.log('📸 Максимум 10 фото в одном сообщении');
+        console.log('🛡  Защита от дублирования сообщений с фото');
         
     } catch (error) {
         console.error('❌ Ошибка запуска:', error);
@@ -651,7 +580,7 @@ startBot();
 // Веб-сервер для проверки
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n📸 Поддержка до 10 фото`);
+    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n⚠️  Фото только в основном сообщении`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
