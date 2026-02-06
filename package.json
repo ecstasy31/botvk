@@ -1,11 +1,16 @@
 {
-  "name": "vk-report-bot",
+  "name": "vk-moder-bot",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "vk-io": "^4.8.0",
-    "firebase-admin": "^12.0.0",
-    "node-fetch": "^3.3.2"
+    "firebase-admin": "^11.5.0",
+    "vk-io": "^4.8.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
