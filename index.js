@@ -175,10 +175,10 @@ db.ref("reports").on("child_added", async (snap) => {
         const report = snap.val();
         const reportId = snap.key;
 
-        // Пропускаем уже отправленные в ВК или старые отчеты (без статуса pending)
-        if (report.vkMessageId || report.status) return;
+        // ИСПРАВЛЕНО: Убрана проверка на report.status, так как новые отчеты часто приходят со статусом "pending"
+        if (report.vkMessageId) return;
 
-        // Ждем 1 секунду, чтобы убедиться, что firebase записал все поля (иногда фото долетают позже)
+        // Ждем 1 секунду, чтобы убедиться, что firebase записал все поля
         await new Promise(r => setTimeout(r, 1000));
 
         const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
@@ -198,14 +198,10 @@ db.ref("reports").on("child_added", async (snap) => {
             `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
             `📊 Баллы к выдаче: ${report.score}`;
 
-        // =======================
-        // 📸 ЗАГРУЗКА ФОТО (ИСПРАВЛЕНО)
-        // =======================
         const attachments = [];
         if (report.photos) {
             const photoUrls = Object.values(report.photos);
             
-            // Загружаем параллельно для скорости
             const uploadPromises = photoUrls.map(async (url) => {
                 try {
                     const response = await fetch(url);
@@ -213,13 +209,12 @@ db.ref("reports").on("child_added", async (snap) => {
                     
                     const buffer = Buffer.from(await response.arrayBuffer());
                     
-                    // Загружаем именно как messagePhoto
                     const photo = await vk.upload.messagePhoto({
                         source: { value: buffer },
                         peer_id: peerId 
                     });
                     
-                    return photo; // Возвращает объект attachment
+                    return photo; 
                 } catch (err) {
                     console.error("Ошибка загрузки фото:", err.message);
                     return null;
@@ -228,7 +223,6 @@ db.ref("reports").on("child_added", async (snap) => {
 
             const uploadedPhotos = await Promise.all(uploadPromises);
             
-            // Фильтруем успешные и преобразуем в строку
             uploadedPhotos.forEach(p => {
                 if(p) attachments.push(p.toString());
             });
@@ -238,7 +232,7 @@ db.ref("reports").on("child_added", async (snap) => {
             .inline()
             .callbackButton({
                 label: "✅ Одобрить",
-                payload: { reportId, action: "ok" }, // attachments не нужны в payload, они есть в сообщении
+                payload: { reportId, action: "ok" },
                 color: "positive"
             })
             .callbackButton({
@@ -247,18 +241,19 @@ db.ref("reports").on("child_added", async (snap) => {
                 color: "negative"
             });
 
+        // ИСПРАВЛЕНО: random_id теперь 0 (vk-io сам сгенерирует корректное число)
         const msg = await vk.api.messages.send({
             peer_id: Number(peerId),
-            random_id: Math.floor(Date.now() + Math.random() * 10000), // Целое число
+            random_id: 0, 
             message: text,
             attachment: attachments,
             keyboard: keyboard.toString()
         });
 
-        // Записываем ID сообщения, чтобы не отправить повторно
+        // Записываем ID сообщения и обновляем статус
         await db.ref(`reports/${reportId}`).update({
             vkMessageId: msg,
-            vkText: text, // Сохраняем текст для редактирования потом
+            vkText: text,
             status: "pending"
         });
 
