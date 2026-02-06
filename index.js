@@ -1,33 +1,55 @@
 import { VK } from "vk-io";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
-console.log("Bot starting...");
+import http from "http";
+import FormData from "form-data";
 
+console.log("=== BOT STARTING ===");
 
-// ===== VK =====
+// ================= VK =================
+console.log("VK TOKEN EXISTS:", !!process.env.VK_TOKEN);
+console.log("CHAT_ID:", process.env.CHAT_ID);
+
 const vk = new VK({
   token: process.env.VK_TOKEN
 });
 
-const CHAT_ID = process.env.CHAT_ID;
+const CHAT_ID = Number(process.env.CHAT_ID);
 
-// ===== Firebase =====
+// ================= FIREBASE =================
 admin.initializeApp({
-  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_KEY)),
+  credential: admin.credential.cert(
+    JSON.parse(process.env.FIREBASE_KEY)
+  ),
   databaseURL: "https://modersekb-default-rtdb.firebaseio.com"
 });
 
 const db = admin.database();
+console.log("Firebase connected");
 
-db.ref("reports").on("child_added", snap => {
-  console.log("NEW REPORT:", snap.key);
+// ================= VK UPDATES =================
+vk.updates.on("message_event", async (ctx) => {
+  const { id, a } = ctx.payload;
+
+  await db.ref(`reports/${id}/status`)
+    .set(a === "ok" ? "approved" : "rejected");
+
+  await ctx.answer({
+    type: "show_snackbar",
+    text: a === "ok" ? "Отчет одобрен" : "Отчет отклонён"
+  });
 });
 
+vk.updates.start().then(() => {
+  console.log("VK updates started");
+});
 
-// ===== Слушаем новые отчёты =====
-db.ref("reports").on("child_added", async snap => {
+// ================= FIREBASE LISTENER =================
+db.ref("reports").on("child_added", async (snap) => {
+  console.log("NEW REPORT:", snap.key);
+
   const report = snap.val();
-  if (report.status !== "pending") return;
+  if (!report || report.status !== "pending") return;
 
   const text = `
 📝 ОТЧЕТ МОДЕРАТОРА
@@ -42,55 +64,23 @@ ${report.work}
 🚫 Наказаний: ${report.punishments}
   `;
 
-  // Загружаем фото в VK
-  let attachments = [];
+  try {
+    const msgId = await vk.api.messages.send({
+      peer_id: CHAT_ID,
+      random_id: Date.now(),
+      message: text
+    });
 
-  for (const url of report.photos || []) {
-    const photo = await uploadPhoto(url);
-    attachments.push(photo);
+    console.log("VK MESSAGE SENT:", msgId);
+
+    await db.ref(`reports/${snap.key}/vkMessageId`).set(msgId);
+
+  } catch (err) {
+    console.error("VK SEND ERROR:", err);
   }
-
-try {
-  const msg = await vk.api.messages.send({
-    peer_id: Number(CHAT_ID),
-    random_id: Date.now(),
-    message: text
-  });
-
-  console.log("VK MESSAGE SENT:", msg);
-
-} catch (err) {
-  console.error("VK SEND ERROR:", err);
-}
-
-// ===== Загрузка фото =====
-async function uploadPhoto(url) {
-  const server = await vk.api.photos.getMessagesUploadServer({ peer_id: CHAT_ID });
-  const buffer = await fetch(url).then(r => r.buffer());
-
-  const form = new FormData();
-  form.append("photo", buffer, "img.jpg");
-
-  const upload = await fetch(server.upload_url, { method: "POST", body: form }).then(r => r.json());
-  const saved = await vk.api.photos.saveMessagesPhoto(upload);
-
-  return `photo${saved[0].owner_id}_${saved[0].id}`;
-}
-
-vk.updates.on("message_event", async ctx => {
-  const { id, a } = ctx.payload;
-
-  await db.ref(`reports/${id}/status`)
-    .set(a === "ok" ? "approved" : "rejected");
-
-  await ctx.answer({
-    type: "show_snackbar",
-    text: a === "ok" ? "Отчет одобрен" : "Отчет отклонён"
-  });
 });
 
-import http from "http";
-
+// ================= HTTP SERVER (Render Free Fix) =================
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {
