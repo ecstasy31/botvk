@@ -12,6 +12,8 @@ const vk = new VK({
   pollingGroupId: Number(process.env.VK_GROUP_ID)
 });
 
+vk.updates.useCallback(); // 🔥 ОБЯЗАТЕЛЬНО ДЛЯ КНОПОК
+
 // =======================
 // FIREBASE
 // =======================
@@ -24,25 +26,24 @@ const db = admin.database();
 console.log("🚀 Бот запущен");
 
 // =======================
-// MESSAGE_NEW (ЕДИНСТВЕННЫЙ)
+// MESSAGE_NEW
 // =======================
 vk.updates.on("message_new", async (ctx) => {
   if (ctx.isOutbox || !ctx.text) return;
-
   const text = ctx.text.trim();
 
-  // ===== /bind =====
   if (text === "/bind") {
     await db.ref("settings/chatPeerId").set(ctx.peerId);
     return ctx.send(`✅ Беседа привязана\npeer_id: ${ctx.peerId}`);
   }
 
-  // ===== /id =====
   if (text === "/id") {
     return ctx.send(`peer_id: ${ctx.peerId}`);
   }
 
-  // ===== /info =====
+  // =======================
+  // /INFO
+  // =======================
   if (text.startsWith("/info")) {
     const nick = text.replace("/info", "").trim();
     if (!nick) return ctx.send("❗ Используй: /info Ник");
@@ -50,45 +51,37 @@ vk.updates.on("message_new", async (ctx) => {
     const usersSnap = await db.ref("users").once("value");
     const users = usersSnap.val() || {};
 
-    let userId = null;
-    let userData = null;
-
-    for (const id in users) {
-      if ((users[id].nickname || "").toLowerCase() === nick.toLowerCase()) {
-        userId = id;
-        userData = users[id];
-        break;
-      }
-    }
-
-    if (!userData) return ctx.send("❌ Модератор не найден");
+    let userData = Object.values(users).find(
+      u => (u.nickname || "").toLowerCase() === nick.toLowerCase()
+    );
 
     const reportsSnap = await db.ref("reports").once("value");
     const reports = reportsSnap.val() || {};
 
     const userReports = Object.values(reports).filter(
-      r => (r.author || r.nickname) === userData.nickname
+      r => (r.author || "").toLowerCase() === nick.toLowerCase()
     );
+
+    if (!userData && userReports.length === 0) {
+      return ctx.send("❌ Модератор не найден");
+    }
 
     const lastReport = userReports.sort(
       (a, b) => new Date(b.date || 0) - new Date(a.date || 0)
     )[0];
 
     const avgScore = userReports.length
-      ? Math.round(
-          userReports.reduce((s, r) => s + Number(r.score || 0), 0) /
-          userReports.length
-        )
+      ? Math.round(userReports.reduce((s, r) => s + Number(r.score || 0), 0) / userReports.length)
       : 0;
 
     return ctx.send(
 `📋 ИНФОРМАЦИЯ О МОДЕРАТОРЕ
 
-👤 Ник: ${userData.nickname}
-🎖 Роль: ${userData.role || "не указана"}
-🟢 Статус: ${userData.active ? "активен" : "неактивен"}
+👤 Ник: ${nick}
+🎖 Роль: ${userData?.role || lastReport?.role || "не указана"}
+🟢 Статус: ${userData?.active ? "активен" : "неактивен"}
 
-📊 Баллы: ${userData.score || 0}
+📊 Баллы: ${userData?.score || 0}
 📝 Отчетов: ${userReports.length}
 📅 Последний отчет: ${lastReport?.date || "нет"}
 📈 Средний балл: ${avgScore}`
@@ -105,12 +98,11 @@ vk.updates.on("message_event", async (ctx) => {
       ? JSON.parse(ctx.payload)
       : ctx.payload;
 
-    if (!payload?.reportId) return ctx.answer();
+    const { reportId, action } = payload || {};
+    if (!reportId) return ctx.answer();
 
-    const { reportId, action } = payload;
     const snap = await db.ref(`reports/${reportId}`).once("value");
     const report = snap.val();
-
     if (!report || report.status !== "pending") {
       return ctx.answer({ type: "show_snackbar", text: "Уже обработано" });
     }
@@ -165,16 +157,10 @@ vk.updates.on("message_event", async (ctx) => {
 });
 
 // =======================
-// ОТЧЕТЫ
+// ОТЧЕТЫ + ФОТО
 // =======================
 async function startReportListener() {
-  const lastSnap = await db.ref("reports").limitToLast(1).once("value");
-  const lastKey = lastSnap.exists() ? Object.keys(lastSnap.val())[0] : null;
-
-  let query = db.ref("reports").orderByKey();
-  if (lastKey) query = query.startAfter(lastKey);
-
-  query.on("child_added", async (snap) => {
+  db.ref("reports").on("child_added", async (snap) => {
     const reportId = snap.key;
     const report = snap.val();
     if (report.vkMessageId) return;
@@ -185,7 +171,7 @@ async function startReportListener() {
     const text =
 `📝 НОВЫЙ ОТЧЕТ
 
-👤 Ник: ${report.nickname || report.author}
+👤 Ник: ${report.author}
 🔰 Должность: ${report.role}
 📅 Дата: ${report.date}
 
@@ -194,8 +180,8 @@ async function startReportListener() {
 📊 Баллы: ${report.score}`;
 
     const attachments = [];
-    const photos = [...(report.photos || []), ...(report.photo || [])].filter(Boolean);
 
+    const photos = Object.values(report.photos || {});
     for (const url of photos) {
       try {
         const r = await fetch(url);
