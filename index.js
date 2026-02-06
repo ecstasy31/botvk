@@ -1,9 +1,7 @@
-import { VK, Keyboard, MessageContext } from "vk-io";
+import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
 import http from "http";
-import fs from "fs";
-import path from "path";
 
 // =======================
 // ИНИЦИАЛИЗАЦИЯ
@@ -15,7 +13,7 @@ const vk = new VK({
 });
 
 // Укажи основной адрес сайта БЕЗ слеша в конце
-const SITE_URL = "https://ecstasy31.github.io/moderation-panel/?clckid=dd788c52"; 
+const SITE_URL = "https://ваш-сайт.com"; 
 
 if (!admin.apps.length) {
     admin.initializeApp({
@@ -25,8 +23,9 @@ if (!admin.apps.length) {
 }
 
 const db = admin.database();
-let isBotReady = false; // Флаг для игнорирования старых отчетов при старте
-let processedReports = new Set(); // Множество для отслеживания обработанных отчетов
+let isBotReady = false;
+let botStartTime = null; // Время запуска бота
+let processedUsers = new Set(); // Множество для отслеживания обработанных пользователей
 
 console.log("🚀 Бот запускается...");
 
@@ -47,117 +46,28 @@ vk.updates.on("message_new", async (ctx) => {
         return ctx.send(`peer_id: ${ctx.peerId}`);
     }
 
-    // КОМАНДА ДЛЯ ТАБЛИЦЫ - ПОКАЗЫВАЕТ ИНФОРМАЦИЮ ИЗ ТАБЛИЦЫ САЙТА
-    if (text.toLowerCase().startsWith("/table") || text.toLowerCase().startsWith("/таблица")) {
-        const nickRaw = text.replace(/^\/(table|таблица)\s*/i, "").trim();
-        if (!nickRaw) {
-            // Если ник не указан, показываем всю таблицу
-            try {
-                const tableSnap = await db.ref("full_table").once("value");
-                const tableData = tableSnap.val() || {};
-                
-                if (Object.keys(tableData).length === 0) {
-                    return ctx.send("📊 Таблица пока пуста.");
-                }
-                
-                // Формируем список всех пользователей из таблицы
-                let message = "📊 ОБЩАЯ ТАБЛИЦА МОДЕРАЦИИ:\n\n";
-                
-                Object.values(tableData).forEach((row, index) => {
-                    const daysSinceStart = row.dateStart ? calculateDaysSince(row.dateStart) : "?";
-                    const daysSincePromotion = row.lastUp && row.lastUp !== "-" ? calculateDaysSince(row.lastUp) : "-";
-                    
-                    message += `${index + 1}. ${row.nick || "Неизвестно"}\n`;
-                    message += `   Должность: ${row.rank || "-"}\n`;
-                    message += `   Начал: ${row.dateStart || "-"} (${daysSinceStart} дн.)\n`;
-                    message += `   Выговоры: ${row.warns || "[0/3]"}\n`;
-                    message += `   Предупреждения: ${row.preds || "[0/2]"}\n`;
-                    message += `   Последнее повышение: ${row.lastUp || "-"}`;
-                    if (daysSincePromotion !== "-") {
-                        message += ` (${daysSincePromotion} дн.)`;
-                    }
-                    message += `\n${"-".repeat(30)}\n`;
-                });
-                
-                return ctx.send(message);
-                
-            } catch (error) {
-                console.error("Ошибка при получении таблицы:", error);
-                return ctx.send("❌ Ошибка при получении данных таблицы.");
-            }
-        }
-        
-        // Если указан ник, ищем конкретного пользователя
-        try {
-            const tableSnap = await db.ref("full_table").once("value");
-            const tableData = tableSnap.val() || {};
-            
-            // Ищем пользователя в таблице (регистронезависимый поиск)
-            const userEntry = Object.values(tableData).find(row => 
-                row.nick && row.nick.toLowerCase().includes(nickRaw.toLowerCase())
-            );
-            
-            if (!userEntry) {
-                return ctx.send(`❌ Пользователь "${nickRaw}" не найден в таблице.`);
-            }
-            
-            const daysSinceStart = userEntry.dateStart ? calculateDaysSince(userEntry.dateStart) : "?";
-            const daysSincePromotion = userEntry.lastUp && userEntry.lastUp !== "-" ? calculateDaysSince(userEntry.lastUp) : "-";
-            
-            // Формируем подробное сообщение
-            let message = `📊 ИНФОРМАЦИЯ ИЗ ТАБЛИЦЫ:\n\n`;
-            message += `👤 Ник: ${userEntry.nick || "-"}\n`;
-            message += `🎖 Должность: ${userEntry.rank || "-"}\n`;
-            message += `📅 Дата начала: ${userEntry.dateStart || "-"} (${daysSinceStart} дней назад)\n`;
-            message += `⚠️ Выговоры: ${userEntry.warns || "[0/3]"}\n`;
-            message += `📋 Предупреждения: ${userEntry.preds || "[0/2]"}\n`;
-            message += `📈 Последнее повышение: ${userEntry.lastUp || "-"}`;
-            if (daysSincePromotion !== "-") {
-                message += ` (${daysSincePromotion} дней назад)`;
-            }
-            
-            return ctx.send(message);
-            
-        } catch (error) {
-            console.error("Ошибка при поиске в таблице:", error);
-            return ctx.send("❌ Ошибка при получении данных из таблицы.");
-        }
-    }
-
-    // СТАРАЯ КОМАНДА INFO (для обратной совместимости)
+    // КОМАНДА INFO
     if (text.toLowerCase().startsWith("/info")) {
         const nickRaw = text.replace(/^\/info\s*/i, "").trim();
         if (!nickRaw) return ctx.send("❗ Используй: /info Ник");
 
-        const [usersSnap, reportsSnap, tableSnap] = await Promise.all([
+        const [usersSnap, reportsSnap] = await Promise.all([
             db.ref("users").once("value"),
-            db.ref("reports").once("value"),
-            db.ref("full_table").once("value")
+            db.ref("reports").once("value")
         ]);
 
         const users = usersSnap.val() || {};
         const reports = reportsSnap.val() || {};
-        const tableData = tableSnap.val() || {};
-        
         const targetKey = Object.keys(users).find(k => k.toLowerCase() === nickRaw.toLowerCase());
         const userEntry = targetKey ? users[targetKey] : null;
         const userReports = Object.values(reports).filter(r => (r.author || "").toLowerCase() === nickRaw.toLowerCase());
-        
-        // Ищем в таблице
-        const tableEntry = Object.values(tableData).find(row => 
-            row.nick && row.nick.toLowerCase() === nickRaw.toLowerCase()
-        );
 
-        if (!userEntry && userReports.length === 0 && !tableEntry) {
+        if (!userEntry && userReports.length === 0) {
             return ctx.send(`❌ Модератор "${nickRaw}" не найден.`);
         }
 
         const lastReport = userReports.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))[0];
         const avgScore = userReports.length ? Math.round(userReports.reduce((s, r) => s + (Number(r.score) || 0), 0) / userReports.length) : 0;
-        
-        // Дни из таблицы
-        const daysSinceStart = tableEntry?.dateStart ? calculateDaysSince(tableEntry.dateStart) : "?";
-        const daysSincePromotion = tableEntry?.lastUp && tableEntry.lastUp !== "-" ? calculateDaysSince(tableEntry.lastUp) : "-";
 
         // Ссылка на конкретного пользователя на сайте
         const personalUrl = `${SITE_URL}/#profile?user=${encodeURIComponent(targetKey || nickRaw)}`;
@@ -166,18 +76,12 @@ vk.updates.on("message_new", async (ctx) => {
         message += `👤 Ник: ${targetKey || nickRaw}\n`;
         message += `📧 Почта: ${userEntry?.email || "нет"}\n`;
         message += `🎖 Роль: ${userEntry?.role || lastReport?.role || "нет"}\n`;
-        message += `🏢 Должность (таблица): ${tableEntry?.rank || userEntry?.rank || "нет"}\n`;
-        message += `📅 Дата начала: ${tableEntry?.dateStart || "нет"}`;
-        if (daysSinceStart !== "?") message += ` (${daysSinceStart} дн.)\n`;
-        message += `⚠️ Выговоры: ${tableEntry?.warns || "[0/3]"}\n`;
-        message += `📊 Баллы: ${userEntry?.score || 0}\n`;
+        if (userEntry?.rank) message += `🏢 Должность: ${userEntry.rank}\n`;
+        if (userEntry?.score !== undefined) message += `📊 Баллы: ${userEntry.score}\n`;
         message += `📝 Отчетов: ${userReports.length}\n`;
-        message += `📅 Последний отчет: ${lastReport?.date || "нет"}\n`;
-        message += `📈 Средний балл: ${avgScore}`;
-        if (tableEntry?.lastUp && tableEntry.lastUp !== "-") {
-            message += `\n📈 Последнее повышение: ${tableEntry.lastUp}`;
-            if (daysSincePromotion !== "-") message += ` (${daysSincePromotion} дн.)`;
-        }
+        if (lastReport?.date) message += `📅 Последний отчет: ${lastReport.date}\n`;
+        message += `📈 Средний балл: ${avgScore}\n`;
+        if (userEntry?.lastSeen) message += `🕒 Последний вход: ${new Date(userEntry.lastSeen).toLocaleString()}`;
 
         return ctx.send({
             message: message,
@@ -234,32 +138,6 @@ vk.updates.on("message_event", async (ctx) => {
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // =======================
 
-// Функция для расчета дней с даты
-function calculateDaysSince(dateString) {
-    if (!dateString || dateString === "-") return "?";
-    
-    try {
-        const parts = dateString.split('.');
-        if (parts.length !== 3) return "?";
-        
-        const day = parseInt(parts[0], 10);
-        const month = parseInt(parts[1], 10) - 1;
-        const year = parseInt(parts[2], 10);
-        
-        const date = new Date(year, month, day);
-        if (isNaN(date.getTime())) return "?";
-        
-        const now = new Date();
-        const diffTime = Math.abs(now - date);
-        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-        
-        return diffDays.toString();
-    } catch (error) {
-        console.error("Ошибка при расчете дней:", error);
-        return "?";
-    }
-}
-
 // Функция для загрузки изображения в ВК
 async function uploadImageToVK(imageUrl, peerId) {
     try {
@@ -303,100 +181,176 @@ async function uploadImageToVK(imageUrl, peerId) {
     }
 }
 
+// Получение ID беседы
+async function getChatId() {
+    const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
+    return peerIdSnap.val();
+}
+
 // =======================
-// НОВЫЕ ОТЧЕТЫ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+// НОВЫЕ ПОЛЬЗОВАТЕЛИ
 // =======================
 
-// При старте загружаем все существующие отчеты и добавляем их в processedReports
-db.ref("reports").once("value", async (snap) => {
-    const allReports = snap.val() || {};
-    Object.keys(allReports).forEach(reportId => {
-        processedReports.add(reportId);
-    });
+// Обработка новых пользователей
+db.ref("users").on("child_added", async (snap) => {
+    const userId = snap.key;
+    const userData = snap.val();
     
-    isBotReady = true;
-    console.log(`✅ База данных синхронизирована. Загружено ${processedReports.size} существующих отчетов. Бот готов принимать НОВЫЕ отчеты.`);
-});
-
-// Слушаем добавление новых отчетов
-db.ref("reports").on("child_added", async (snap) => {
-    const reportId = snap.key;
-    const report = snap.val();
-    
-    // Проверяем, обрабатывали ли мы этот отчет ранее
-    if (processedReports.has(reportId)) {
-        console.log(`[SKIP] Отчет ${reportId} уже был обработан ранее. Пропускаем.`);
+    // Проверяем, обрабатывали ли мы этого пользователя ранее
+    if (processedUsers.has(userId)) {
+        console.log(`[USER] Пользователь ${userId} уже был обработан ранее. Пропускаем.`);
         return;
     }
     
     // Добавляем в обработанные
-    processedReports.add(reportId);
+    processedUsers.add(userId);
     
     // Проверяем, готов ли бот
     if (!isBotReady) {
-        console.log(`[WAIT] Бот еще не готов. Отложу отчет ${reportId}...`);
-        setTimeout(() => {
+        console.log(`[USER] Бот еще не готов. Отложу пользователя ${userId}...`);
+        setTimeout(async () => {
             if (isBotReady) {
-                processReport(reportId, report);
+                await processNewUser(userId, userData);
             }
-        }, 5000);
+        }, 3000);
         return;
     }
     
-    await processReport(reportId, report);
+    await processNewUser(userId, userData);
 });
 
-// Функция обработки отчета
-async function processReport(reportId, report) {
+// Функция обработки нового пользователя
+async function processNewUser(userId, userData) {
     try {
-        // Проверяем, был ли отчет уже отправлен в ВК
+        // Проверяем, был ли пользователь уже уведомлен
+        if (userData.vkNotified) {
+            console.log(`[USER] Пользователь ${userId} уже был уведомлен. Пропускаем.`);
+            return;
+        }
+        
+        console.log(`[USER] Обрабатываю нового пользователя: ${userId}`);
+        
+        // Получаем ID беседы
+        const peerId = await getChatId();
+        if (!peerId) {
+            console.error("[USER] ID беседы не установлен!");
+            return;
+        }
+        
+        // Формируем сообщение в зависимости от роли
+        let message = "";
+        if (userData.role === 'pending') {
+            message = `🆕 НОВАЯ ЗАЯВКА НА ВСТУПЛЕНИЕ\n\n` +
+                     `👤 Ник: ${userData.nick || userId}\n` +
+                     `📧 Почта: ${userData.email || "не указана"}\n` +
+                     `🕒 Время регистрации: ${new Date(userData.lastSeen || Date.now()).toLocaleString()}\n` +
+                     `\n✍️ Требуется одобрение Главного Модератора\n` +
+                     `Ссылка: ${SITE_URL}/#profile?user=${encodeURIComponent(userId)}`;
+        } else {
+            message = `👤 НОВЫЙ ПОЛЬЗОВАТЕЛЬ В СИСТЕМЕ\n\n` +
+                     `Ник: ${userData.nick || userId}\n` +
+                     `Роль: ${userData.role || "user"}\n` +
+                     `Должность: ${userData.rank || "Не назначена"}\n` +
+                     `\nДобро пожаловать в команду! 🎉`;
+        }
+        
+        // Отправляем сообщение
+        await vk.api.messages.send({
+            peer_id: Number(peerId),
+            random_id: Math.floor(Math.random() * 2000000000),
+            message: message
+        });
+        
+        console.log(`✅ Уведомление о новом пользователе ${userId} отправлено.`);
+        
+        // Помечаем как уведомленного
+        await db.ref(`users/${userId}`).update({
+            vkNotified: true,
+            vkNotificationTime: Date.now()
+        });
+        
+    } catch (error) {
+        console.error(`❌ Ошибка при обработке нового пользователя ${userId}:`, error);
+    }
+}
+
+// =======================
+// НОВЫЕ ОТЧЕТЫ (ИСПРАВЛЕННЫЙ БАГ)
+// =======================
+
+// При старте бота запоминаем время запуска
+db.ref("reports").once("value", async (snap) => {
+    botStartTime = Date.now(); // Запоминаем время запуска бота
+    isBotReady = true;
+    console.log(`✅ Бот готов к работе. Запущен в: ${new Date(botStartTime).toLocaleString()}`);
+    console.log(`📊 Будут обрабатываться только отчеты, созданные после запуска бота.`);
+});
+
+// Слушаем добавление новых отчетов
+db.ref("reports").on("child_added", async (snap) => {
+    if (!isBotReady) {
+        console.log(`[REPORT] Бот еще не готов. Ждем...`);
+        setTimeout(() => {
+            if (isBotReady) {
+                processNewReport(snap);
+            }
+        }, 3000);
+        return;
+    }
+    
+    await processNewReport(snap);
+});
+
+// Функция обработки нового отчета
+async function processNewReport(snap) {
+    const reportId = snap.key;
+    const report = snap.val();
+    
+    try {
+        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем время создания отчета
+        // Если отчет был создан ДО запуска бота - пропускаем его
+        const reportCreationTime = report.timestamp || report.createdAt || 0;
+        
+        // Если отчет не имеет временной метки или был создан до запуска бота
+        if (reportCreationTime && reportCreationTime < botStartTime) {
+            console.log(`[SKIP] Отчет ${reportId} был создан ДО запуска бота (${new Date(reportCreationTime).toLocaleString()}). Пропускаем.`);
+            return;
+        }
+        
+        // Также проверяем, был ли отчет уже отправлен в ВК
         if (report.vkMessageId) {
             console.log(`[SKIP] Отчет ${reportId} уже отправлен в ВК. Пропускаем.`);
             return;
         }
         
-        console.log(`[PROCESS] Обрабатываю новый отчет ${reportId} от ${report.author || "неизвестно"}`);
-        
-        // Пауза для стабилизации данных
-        await new Promise(r => setTimeout(r, 1000));
-        
-        // Получаем свежие данные
-        const freshSnap = await db.ref(`reports/${reportId}`).once("value");
-        const freshReport = freshSnap.val();
-        
-        if (!freshReport) {
-            console.error(`[ERROR] Отчет ${reportId} не найден в базе`);
-            return;
-        }
+        console.log(`[REPORT] Обрабатываю новый отчет ${reportId} от ${report.author || "неизвестно"}`);
         
         // Получаем ID беседы
-        const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
-        const peerId = peerIdSnap.val();
-        
+        const peerId = await getChatId();
         if (!peerId) {
-            console.error("⚠ ID беседы не установлен! Используйте /bind в нужной беседе.");
+            console.error("[REPORT] ID беседы не установлен! Используйте /bind в нужной беседе.");
             return;
         }
         
         // Формируем текст сообщения
         const text = 
             `📝 НОВЫЙ ОТЧЕТ\n\n` +
-            `👤 Ник: ${freshReport.author || "—"}\n` +
-            `🔰 Должность: ${freshReport.role || "—"}\n` +
-            `📅 Дата: ${freshReport.date || "—"}\n\n` +
-            `🛠 Работа: ${freshReport.work || "—"}\n` +
-            `⚖️ Наказания: ${freshReport.punishments || "Нет"}\n` +
-            `📊 Баллы: ${freshReport.score || 0}`;
+            `👤 Ник: ${report.author || "—"}\n` +
+            `🔰 Должность: ${report.role || "—"}\n` +
+            `📅 Дата: ${report.date || "—"}\n\n` +
+            `🛠 Работа: ${report.work || "—"}\n` +
+            `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
+            `📊 Баллы: ${report.score || 0}`;
         
         // --- ЛОГИКА ЗАГРУЗКИ ФОТО ---
         const attachments = [];
         
         // Проверяем наличие изображений в формате base64
-        if (freshReport.imgs && Array.isArray(freshReport.imgs)) {
-            console.log(`[PHOTO] Найдено ${freshReport.imgs.length} фото для отчета ${reportId}`);
+        if (report.imgs && Array.isArray(report.imgs)) {
+            console.log(`[PHOTO] Найдено ${report.imgs.length} фото для отчета ${reportId}`);
             
-            for (let i = 0; i < freshReport.imgs.length; i++) {
-                const imgData = freshReport.imgs[i];
+            for (let i = 0; i < report.imgs.length; i++) {
+                const imgData = report.imgs[i];
                 
                 // Проверяем, является ли это base64
                 if (typeof imgData === 'string' && imgData.startsWith('data:image')) {
@@ -466,16 +420,16 @@ async function processReport(reportId, report) {
             vkMessageId: msgId,
             vkText: text,
             status: "pending",
-            processedAt: Date.now()
+            processedAt: Date.now(),
+            botProcessed: true
         });
         
     } catch (error) {
-        console.error(`❌ Критическая ошибка при обработке отчета ${reportId}:`, error);
+        console.error(`❌ Ошибка при обработке отчета ${reportId}:`, error);
         
         // Пытаемся отправить сообщение об ошибке (если возможно)
         try {
-            const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
-            const peerId = peerIdSnap.val();
+            const peerId = await getChatId();
             
             if (peerId) {
                 await vk.api.messages.send({
@@ -491,6 +445,54 @@ async function processReport(reportId, report) {
 }
 
 // =======================
+// ДОПОЛНИТЕЛЬНАЯ ФУНКЦИОНАЛЬНОСТЬ
+// =======================
+
+// Периодическая проверка необработанных отчетов (на всякий случай)
+setInterval(async () => {
+    if (!isBotReady) return;
+    
+    try {
+        console.log(`[CHECK] Проверка на пропущенные отчеты...`);
+        const peerId = await getChatId();
+        if (!peerId) return;
+        
+        // Ищем отчеты без vkMessageId, созданные после запуска бота
+        const reportsSnap = await db.ref("reports").once("value");
+        const reports = reportsSnap.val() || {};
+        
+        let missedCount = 0;
+        const now = Date.now();
+        
+        for (const [reportId, report] of Object.entries(reports)) {
+            // Проверяем, что отчет:
+            // 1. Не имеет vkMessageId (не отправлен)
+            // 2. Был создан после запуска бота
+            // 3. Не старше 1 часа (чтобы не обрабатывать очень старые)
+            const reportTime = report.timestamp || report.createdAt || 0;
+            
+            if (!report.vkMessageId && 
+                reportTime > botStartTime && 
+                (now - reportTime) < 3600000) { // 1 час
+                
+                console.log(`[CHECK] Найден пропущенный отчет: ${reportId}`);
+                missedCount++;
+                
+                // Обрабатываем отчет
+                await processNewReport({ key: reportId, val: () => report });
+            }
+        }
+        
+        if (missedCount > 0) {
+            console.log(`[CHECK] Найдено и обработано ${missedCount} пропущенных отчетов.`);
+        }
+        
+    } catch (error) {
+        console.error(`[CHECK] Ошибка при проверке отчетов:`, error);
+    }
+}, 300000); // Проверка каждые 5 минут
+
+// =======================
 // ЗАПУСК
 // =======================
 
@@ -501,15 +503,19 @@ vk.updates.start()
         console.log('  /bind - привязать текущую беседу');
         console.log('  /id - узнать ID беседы');
         console.log('  /info [ник] - информация о модераторе');
-        console.log('  /table [ник] - информация из таблицы (или вся таблица)');
+        console.log('\n✅ Функционал:');
+        console.log('  • Уведомления о новых пользователях');
+        console.log('  • Отправка новых отчетов в чат');
+        console.log('  • Кнопки для одобрения/отклонения отчетов');
+        console.log('  • Загрузка фотографий как изображений');
+        console.log(`\n🕒 Бот запущен: ${new Date().toLocaleString()}`);
     })
     .catch(console.error);
 
 // Веб-сервер для проверки работоспособности
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`Bot is running\nProcessed reports: ${processedReports.size}\nReady: ${isBotReady}`);
+    res.end(`✅ Бот работает\n🕒 Запущен: ${new Date(botStartTime || Date.now()).toLocaleString()}\n📊 Обработано пользователей: ${processedUsers.size}\n🌐 Статус: ${isBotReady ? 'Готов' : 'Загрузка...'}`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Веб-сервер запущен на порту ${process.env.PORT || 3000}`);
-
