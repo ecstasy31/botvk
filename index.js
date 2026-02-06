@@ -188,6 +188,33 @@ db.ref("reports").on("child_added", async (snap) => {
 📊 Баллы: ${report.score}`;
 
   try {
+    // ======================
+    // ЗАГРУЗКА ФОТО В VK
+    // ======================
+
+    let attachments = [];
+
+    const photoList = []
+      .concat(report.photos || [])
+      .concat(report.photo || [])
+      .filter(Boolean);
+
+    for (const url of photoList) {
+      try {
+        const photo = await vk.upload.messagePhoto({
+          source: { value: url }
+        });
+
+        attachments.push(photo.toString());
+      } catch (e) {
+        console.log("⚠️ Фото не загрузилось:", url);
+      }
+    }
+
+    // ======================
+    // КНОПКИ
+    // ======================
+
     const keyboard = Keyboard.builder()
       .inline()
       .callbackButton({
@@ -201,10 +228,15 @@ db.ref("reports").on("child_added", async (snap) => {
         color: "negative"
       });
 
+    // ======================
+    // ОТПРАВКА
+    // ======================
+
     const messageId = await vk.api.messages.send({
       peer_id: peerId,
       random_id: Date.now(),
       message: text,
+      attachment: attachments.join(","),
       keyboard: keyboard.toString()
     });
 
@@ -214,12 +246,13 @@ db.ref("reports").on("child_added", async (snap) => {
       status: "pending"
     });
 
-    console.log("✅ Отчет отправлен");
+    console.log("✅ Отчет отправлен с фото");
 
   } catch (e) {
     console.error("❌ SEND:", e);
   }
 });
+
 
 
 // =======================
@@ -233,3 +266,4 @@ vk.updates.start()
 http.createServer((req, res) => {
   res.end("Bot OK");
 }).listen(process.env.PORT || 3000);
+
