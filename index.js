@@ -12,7 +12,7 @@ const vk = new VK({
 });
 
 const CHAT_ID = Number(process.env.CHAT_ID);
-console.log("CHAT_ID:", CHAT_ID);
+console.log("CHAT_ID:", 2000000086);
 
 // ================= FIREBASE =================
 admin.initializeApp({
@@ -159,3 +159,4 @@ ${report.work}
 http.createServer((_, res) => {
   res.end("VK bot alive");
 }).listen(process.env.PORT || 3000);
+
