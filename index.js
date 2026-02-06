@@ -15,7 +15,7 @@ const vk = new VK({
 });
 
 // Укажи основной адрес сайта БЕЗ слеша в конце
-const SITE_URL = "https://ваш-сайт.com"; 
+const SITE_URL = "https://ecstasy31.github.io/moderation-panel/?clckid=dd788c52"; 
 
 if (!admin.apps.length) {
     admin.initializeApp({
@@ -512,3 +512,4 @@ http.createServer((req, res) => {
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Веб-сервер запущен на порту ${process.env.PORT || 3000}`);
+
