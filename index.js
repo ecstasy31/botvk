@@ -1,4 +1,4 @@
-import { VK } from "vk-io";
+import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
 import FormData from "form-data";
@@ -12,7 +12,7 @@ const vk = new VK({
 });
 
 const CHAT_ID = Number(process.env.CHAT_ID);
-console.log("CHAT_ID:", 2000000086);
+console.log("CHAT_ID:", CHAT_ID);
 
 // ================= FIREBASE =================
 admin.initializeApp({
@@ -25,7 +25,7 @@ admin.initializeApp({
 const db = admin.database();
 console.log("Firebase connected");
 
-// ================= UPLOAD PHOTO =================
+// ================= PHOTO UPLOAD =================
 async function uploadPhoto(base64) {
   const server = await vk.api.photos.getMessagesUploadServer();
 
@@ -48,11 +48,10 @@ async function uploadPhoto(base64) {
 
 // ================= BUTTON HANDLER =================
 vk.updates.on("message_event", async (ctx) => {
-  const payload = JSON.parse(ctx.payload);
-  const { reportId, action } = payload;
+  const { reportId, action } = ctx.payload;
 
-  const reportSnap = await db.ref(`reports/${reportId}`).once("value");
-  const report = reportSnap.val();
+  const snap = await db.ref(`reports/${reportId}`).once("value");
+  const report = snap.val();
 
   if (!report || report.status !== "pending") {
     return ctx.answer({
@@ -62,10 +61,9 @@ vk.updates.on("message_event", async (ctx) => {
   }
 
   const adminId = ctx.userId;
-  const adminInfo = await vk.api.users.get({ user_ids: adminId });
-  const adminName = `${adminInfo[0].first_name} ${adminInfo[0].last_name}`;
+  const [adminInfo] = await vk.api.users.get({ user_ids: adminId });
+  const adminName = `${adminInfo.first_name} ${adminInfo.last_name}`;
 
-  // ===== обновляем статус =====
   const newStatus = action === "ok" ? "approved" : "rejected";
 
   await db.ref(`reports/${reportId}`).update({
@@ -74,17 +72,15 @@ vk.updates.on("message_event", async (ctx) => {
     reviewedAt: Date.now()
   });
 
-  // ===== начисление баллов ТОЛЬКО при одобрении =====
+  // ===== начисление баллов =====
   if (action === "ok") {
     await db.ref(`users/${report.author}`).transaction(u => {
       if (!u) return u;
       u.score = (u.score || 0) + (report.score || 0);
-      u.reportsCount = (u.reportsCount || 0) + 1;
       return u;
     });
   }
 
-  // ===== редактирование сообщения =====
   const statusText =
     action === "ok"
       ? `✅ СТАТУС: ОДОБРЕН\n👮 Проверил: ${adminName}`
@@ -94,16 +90,14 @@ vk.updates.on("message_event", async (ctx) => {
     peer_id: CHAT_ID,
     message_id: report.vkMessageId,
     message: report.vkText + `\n\n${statusText}`,
-    keyboard: JSON.stringify({ buttons: [] })
+    keyboard: Keyboard.empty()
   });
 
-  // ===== лог =====
   await db.ref("logs").push({
     type: "report_review",
     reportId,
-    action: newStatus,
+    status: newStatus,
     admin: adminName,
-    author: report.author,
     time: Date.now()
   });
 
@@ -113,9 +107,7 @@ vk.updates.on("message_event", async (ctx) => {
   });
 });
 
-vk.updates.start().then(() => {
-  console.log("VK updates started");
-});
+vk.updates.start();
 
 // ================= REPORT LISTENER =================
 db.ref("reports").on("child_added", async (snap) => {
@@ -124,8 +116,6 @@ db.ref("reports").on("child_added", async (snap) => {
 
   if (!report) return;
   if (report.status && report.status !== "pending") return;
-
-  console.log("NEW REPORT:", reportId);
 
   const text =
 `📝 ОТЧЕТ МОДЕРАТОРА
@@ -145,62 +135,41 @@ ${report.work}
   if (Array.isArray(report.imgs)) {
     for (const img of report.imgs) {
       try {
-        const photo = await uploadPhoto(img);
-        attachments.push(photo);
-      } catch (e) {
-        console.error("PHOTO ERROR:", e);
-      }
+        attachments.push(await uploadPhoto(img));
+      } catch {}
     }
   }
 
-  const keyboard = {
-    inline: true,
-    buttons: [[
-      {
-        action: {
-          type: "callback",
-          label: "✅ Одобрить",
-          payload: JSON.stringify({ reportId, action: "ok" })
-        },
-        color: "positive"
-      },
-      {
-        action: {
-          type: "callback",
-          label: "❌ Отклонить",
-          payload: JSON.stringify({ reportId, action: "no" })
-        },
-        color: "negative"
-      }
-    ]]
-  };
-
-  try {
-    const msgId = await vk.api.messages.send({
-      peer_id: CHAT_ID,
-      random_id: Date.now(),
-      message: text,
-      attachment: attachments.join(","),
-      keyboard: JSON.stringify(keyboard)
+  const keyboard = Keyboard.inline()
+    .callbackButton({
+      label: "✅ Одобрить",
+      payload: { reportId, action: "ok" },
+      color: Keyboard.POSITIVE_COLOR
+    })
+    .callbackButton({
+      label: "❌ Отклонить",
+      payload: { reportId, action: "no" },
+      color: Keyboard.NEGATIVE_COLOR
     });
 
-    await db.ref(`reports/${reportId}`).update({
-      status: "pending",
-      vkMessageId: msgId,
-      vkText: text
-    });
+  const msgId = await vk.api.messages.send({
+    peer_id: CHAT_ID,
+    random_id: Date.now(),
+    message: text,
+    attachment: attachments.join(","),
+    keyboard
+  });
 
-    console.log("REPORT SENT:", msgId);
-  } catch (e) {
-    console.error("VK SEND ERROR:", e);
-  }
+  await db.ref(`reports/${reportId}`).update({
+    status: "pending",
+    vkMessageId: msgId,
+    vkText: text
+  });
+
+  console.log("REPORT SENT:", reportId);
 });
 
-// ================= HTTP KEEP ALIVE =================
-const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("VK report bot alive");
-}).listen(PORT, () => {
-  console.log("HTTP server started:", PORT);
-});
+// ================= HTTP =================
+http.createServer((_, res) => {
+  res.end("VK bot alive");
+}).listen(process.env.PORT || 3000);
