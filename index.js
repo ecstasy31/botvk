@@ -19,6 +19,11 @@ admin.initializeApp({
 
 const db = admin.database();
 
+db.ref("reports").on("child_added", snap => {
+  console.log("NEW REPORT:", snap.key);
+});
+
+
 // ===== Слушаем новые отчёты =====
 db.ref("reports").on("child_added", async snap => {
   const report = snap.val();
@@ -104,4 +109,5 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log("HTTP server started on port", PORT);
 });
+
 
