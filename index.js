@@ -50,28 +50,18 @@ ${report.work}
     attachments.push(photo);
   }
 
+try {
   const msg = await vk.api.messages.send({
-    peer_id: CHAT_ID,
+    peer_id: Number(CHAT_ID),
     random_id: Date.now(),
-    message: text,
-    attachment: attachments.join(","),
-    keyboard: JSON.stringify({
-      inline: true,
-      buttons: [
-        [{
-          action: { type: "callback", label: "✅ Одобрить", payload: { id: snap.key, a: "ok" } },
-          color: "positive"
-        }],
-        [{
-          action: { type: "callback", label: "❌ Отклонить", payload: { id: snap.key, a: "no" } },
-          color: "negative"
-        }]
-      ]
-    })
+    message: text
   });
 
-  db.ref(`reports/${snap.key}/vkMessageId`).set(msg);
-});
+  console.log("VK MESSAGE SENT:", msg);
+
+} catch (err) {
+  console.error("VK SEND ERROR:", err);
+}
 
 // ===== Загрузка фото =====
 async function uploadPhoto(url) {
@@ -109,5 +99,6 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log("HTTP server started on port", PORT);
 });
+
 
 
