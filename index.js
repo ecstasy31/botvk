@@ -12,7 +12,7 @@ const vk = new VK({
     pollingGroupId: Number(process.env.VK_GROUP_ID)
 });
 
-const SITE_URL = "https://ecstasy31.github.io/moderation-panel/?clckid=dd788c52";
+const SITE_URL = "https://ecstasy31.github.io/moderation-panel/";
 
 if (!admin.apps.length) {
     admin.initializeApp({
@@ -590,3 +590,4 @@ http.createServer((req, res) => {
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
+
