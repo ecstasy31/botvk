@@ -3,8 +3,8 @@ import admin from "firebase-admin";
 import http from "http";
 
 const TARGET_PEER_ID = 2000000086;
-// Добавляем запас в 5 минут, чтобы не игнорировать новые отчеты из-за разницы времени
-const BOT_START_TIME = Date.now() - (5 * 60 * 1000); 
+// Бот слушает отчеты, отправленные за последние 10 минут и новее
+const BOT_START_TIME = Date.now() - (10 * 60 * 1000); 
 
 const vk = new VK({
   token: process.env.VK_TOKEN,
@@ -19,7 +19,7 @@ admin.initializeApp({
 });
 const db = admin.database();
 
-console.log("🚀 Бот запущен. Ожидание отчетов...");
+console.log("🚀 Бот запускается...");
 
 // --- КОМАНДЫ ---
 vk.updates.on('message_new', async (ctx) => {
@@ -62,7 +62,7 @@ vk.updates.on("message_event", async (ctx) => {
         const report = snap.val();
 
         if (!report || report.status !== "pending") {
-            return ctx.answer({ type: "show_snackbar", text: "❌ Уже проверено!" });
+            return ctx.answer({ type: "show_snackbar", text: "❌ Уже проверено или не найдено!" });
         }
 
         const [user] = await vk.api.users.get({ user_ids: ctx.userId });
@@ -98,15 +98,18 @@ db.ref("reports").on("child_added", async (snap) => {
 
     if (!report || report.vkMessageId) return;
 
-    // Проверка времени
-    if (!report.timestamp || report.timestamp < BOT_START_TIME) {
-        console.log(`[Игнор] Старый отчет от ${report.author}`);
+    // Безопасная проверка времени
+    // Если timestamp нет (старые отчеты), считаем их старыми (0)
+    const reportTime = report.timestamp || 0; 
+    
+    if (reportTime < BOT_START_TIME) {
+        // console.log(`[Игнор] Старый отчет от ${report.author}`);
         return;
     }
 
     console.log(`📩 Получен новый отчет от ${report.author}. Отправляю в ВК...`);
 
-    const text = `📝 НОВЫЙ ОТЧЕТ\n\n👤 Ник: ${report.nickname}\n🔰 Должность: ${report.role}\n📅 Дата: ${report.date}\n\n🛠 Работа: ${report.work}\n⚖️ Наказания: ${report.punishments}\n📊 Баллы: ${report.score}`;
+    const text = `📝 НОВЫЙ ОТЧЕТ\n\n👤 Ник: ${report.nickname || report.author}\n🔰 Должность: ${report.role}\n📅 Дата: ${report.date}\n\n🛠 Работа: ${report.work}\n⚖️ Наказания: ${report.punishments}\n📊 Баллы: ${report.score}`;
 
     try {
         const keyboard = Keyboard.builder().inline()
@@ -131,4 +134,9 @@ db.ref("reports").on("child_added", async (snap) => {
     }
 });
 
-http.createServer((req, res) => res.end("OK")).listen(process.env.PORT || 3000);
+// --- ЗАПУСК ПОЛЛИНГА (БЕЗ ЭТОГО БОТ НЕ РАБОТАЕТ) ---
+vk.updates.start()
+    .then(() => console.log("✅ Polling started"))
+    .catch(console.error);
+
+http.createServer((req, res) => res.end("Bot is alive!")).listen(process.env.PORT || 3000);
