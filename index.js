@@ -1,6 +1,8 @@
 import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
+import fetch from "node-fetch";
 import http from "http";
+import { Readable } from "stream";
 
 const vk = new VK({
   token: process.env.VK_TOKEN,
@@ -19,11 +21,9 @@ const db = admin.database();
 
 console.log("🚀 Бот запускается...");
 
-
 // =======================
 // ПРИВЯЗКА БЕСЕДЫ
 // =======================
-
 vk.updates.on("message_new", async (ctx) => {
   if (!ctx.text || ctx.isOutbox) return;
 
@@ -37,11 +37,9 @@ vk.updates.on("message_new", async (ctx) => {
   }
 });
 
-
 // =======================
 // /INFO НИК
 // =======================
-
 vk.updates.on("message_new", async (ctx) => {
   if (!ctx.text || ctx.isOutbox) return;
   if (!ctx.text.startsWith("/info")) return;
@@ -69,8 +67,7 @@ vk.updates.on("message_new", async (ctx) => {
   const userReports = Object.values(reports)
     .filter(r => r.author === found.nickname);
 
-  const lastReport = userReports.sort((a,b)=>
-    new Date(b.date||0)-new Date(a.date||0))[0];
+  const lastReport = userReports.sort((a,b)=> new Date(b.date||0)-new Date(a.date||0))[0];
 
   const avgScore = userReports.length
     ? Math.round(
@@ -98,16 +95,14 @@ vk.updates.on("message_new", async (ctx) => {
   ctx.send(text);
 });
 
-
 // =======================
 // КНОПКИ ОДОБРИТЬ / ОТКАЗАТЬ
 // =======================
-
 vk.updates.on("message_event", async (ctx) => {
   try {
     if (!ctx.payload) return;
 
-    const { reportId, action } = ctx.payload;
+    const { reportId, action } = JSON.parse(ctx.payload);
 
     const snap = await db.ref(`reports/${reportId}`).once("value");
     const report = snap.val();
@@ -121,8 +116,6 @@ vk.updates.on("message_event", async (ctx) => {
 
     const [user] = await vk.api.users.get({ user_ids: ctx.userId });
     const adminName = `${user.first_name} ${user.last_name}`;
-
-    const peerId = (await db.ref("settings/chatPeerId").once("value")).val();
 
     const approved = action === "ok";
 
@@ -138,15 +131,21 @@ vk.updates.on("message_event", async (ctx) => {
       checker: adminName
     });
 
+    const peerId = (await db.ref("settings/chatPeerId").once("value")).val();
+
+    // Обновляем сообщение: убираем кнопки и добавляем вердикт
+    const keyboard = Keyboard.builder()
+      .inline()
+      .textButton({
+        label: approved ? "✅ Одобрено" : "❌ Отклонено",
+        color: "secondary"
+      });
+
     await vk.api.messages.edit({
       peer_id: peerId,
       conversation_message_id: ctx.conversationMessageId,
-      message:
-`${report.vkText}
-
-${approved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО"}
-👤 Проверил: ${adminName}`,
-      keyboard: Keyboard.builder().toString()
+      message: `${report.vkText}\n\n${approved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО"}\n👤 Проверил: ${adminName}`,
+      keyboard: keyboard.toString()
     });
 
     ctx.answer({
@@ -159,11 +158,9 @@ ${approved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО"}
   }
 });
 
-
 // =======================
 // НОВЫЙ ОТЧЕТ → В БЕСЕДУ
 // =======================
-
 db.ref("reports").on("child_added", async (snap) => {
   const report = snap.val();
   const reportId = snap.key;
@@ -191,7 +188,6 @@ db.ref("reports").on("child_added", async (snap) => {
     // ======================
     // ЗАГРУЗКА ФОТО В VK
     // ======================
-
     let attachments = [];
 
     const photoList = []
@@ -201,8 +197,11 @@ db.ref("reports").on("child_added", async (snap) => {
 
     for (const url of photoList) {
       try {
+        const res = await fetch(url);
+        const buffer = Buffer.from(await res.arrayBuffer());
+
         const photo = await vk.upload.messagePhoto({
-          source: { value: url }
+          source: { value: buffer, filename: "photo.jpg" }
         });
 
         attachments.push(photo.toString());
@@ -214,24 +213,22 @@ db.ref("reports").on("child_added", async (snap) => {
     // ======================
     // КНОПКИ
     // ======================
-
     const keyboard = Keyboard.builder()
       .inline()
       .callbackButton({
         label: "✅ Одобрить",
-        payload: { reportId, action: "ok" },
+        payload: JSON.stringify({ reportId, action: "ok" }),
         color: "positive"
       })
       .callbackButton({
         label: "❌ Отказать",
-        payload: { reportId, action: "no" },
+        payload: JSON.stringify({ reportId, action: "no" }),
         color: "negative"
       });
 
     // ======================
     // ОТПРАВКА
     // ======================
-
     const messageId = await vk.api.messages.send({
       peer_id: peerId,
       random_id: Date.now(),
@@ -246,19 +243,16 @@ db.ref("reports").on("child_added", async (snap) => {
       status: "pending"
     });
 
-    console.log("✅ Отчет отправлен с фото");
+    console.log("✅ Отчет отправлен с фото и кнопками");
 
   } catch (e) {
     console.error("❌ SEND:", e);
   }
 });
 
-
-
 // =======================
 // ЗАПУСК
 // =======================
-
 vk.updates.start()
   .then(() => console.log("✅ Polling started"))
   .catch(console.error);
@@ -266,4 +260,3 @@ vk.updates.start()
 http.createServer((req, res) => {
   res.end("Bot OK");
 }).listen(process.env.PORT || 3000);
-
