@@ -1,6 +1,8 @@
 import { VK } from "vk-io";
 import admin from "firebase-admin";
 import fetch from "node-fetch";
+console.log("Bot starting...");
+
 
 // ===== VK =====
 const vk = new VK({
@@ -91,3 +93,15 @@ vk.updates.on("message_event", async ctx => {
     text: a === "ok" ? "Отчет одобрен" : "Отчет отклонён"
   });
 });
+
+import http from "http";
+
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("VK bot is alive");
+}).listen(PORT, () => {
+  console.log("HTTP server started on port", PORT);
+});
+
