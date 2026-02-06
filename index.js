@@ -2,9 +2,6 @@ import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import http from "http";
 
-// ⚠️ ВСТАВЬ СЮДА peer_id беседы (бот покажет через /id)
-const TARGET_PEER_ID = 2000000086;
-
 const vk = new VK({
   token: process.env.VK_TOKEN,
   apiVersion: "5.199",
@@ -24,94 +21,81 @@ console.log("🚀 Бот запускается...");
 
 
 // =======================
-// ТЕСТ КОМАНДЫ
+// ПРИВЯЗКА БЕСЕДЫ
 // =======================
 
 vk.updates.on("message_new", async (ctx) => {
   if (!ctx.text || ctx.isOutbox) return;
 
-  if (ctx.text === "/start" || ctx.text === "/id") {
-    return ctx.send(
-      `✅ Бот работает\npeer_id этого чата: ${ctx.peerId}\nTARGET_PEER_ID: ${TARGET_PEER_ID}`
-    );
+  if (ctx.text === "/bind") {
+    await db.ref("settings/chatPeerId").set(ctx.peerId);
+    return ctx.send(`✅ Беседа привязана\npeer_id: ${ctx.peerId}`);
+  }
+
+  if (ctx.text === "/id") {
+    return ctx.send(`peer_id: ${ctx.peerId}`);
   }
 });
 
 
 // =======================
-// КНОПКИ ОДОБРИТЬ / ОТКАЗАТЬ
+// КНОПКИ
 // =======================
 
 vk.updates.on("message_event", async (ctx) => {
   try {
-    if (!ctx.payload) {
-      return ctx.answer({
-        type: "show_snackbar",
-        text: "Нет payload"
-      });
-    }
+    if (!ctx.payload) return;
 
-    const { reportId, action } = ctx.payload;
+    const { reportId } = ctx.payload;
 
     const snap = await db.ref(`reports/${reportId}`).once("value");
     const report = snap.val();
-
-    if (!report || report.status !== "pending") {
-      return ctx.answer({
-        type: "show_snackbar",
-        text: "❌ Уже обработано"
-      });
-    }
+    if (!report) return;
 
     const [user] = await vk.api.users.get({ user_ids: ctx.userId });
     const adminName = `${user.first_name} ${user.last_name}`;
-    const isOk = action === "ok";
 
-    // начисление баллов
-    if (isOk) {
-      const pointsToAdd = parseInt(report.score) || 0;
-
-      await db.ref(`users/${report.author}/score`)
-        .transaction(s => (s || 0) + pointsToAdd);
-    }
-
-    await db.ref(`reports/${reportId}`).update({
-      status: isOk ? "approved" : "rejected",
-      checker: adminName
-    });
+    const peerSnap = await db.ref("settings/chatPeerId").once("value");
+    const peerId = peerSnap.val();
 
     await vk.api.messages.edit({
-      peer_id: TARGET_PEER_ID,
+      peer_id: peerId,
       conversation_message_id: ctx.conversationMessageId,
       message:
 `${report.vkText}
 
-${isOk ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО"}
 👤 Проверил: ${adminName}`,
       keyboard: Keyboard.builder().toString()
     });
 
-    await ctx.answer({
+    ctx.answer({
       type: "show_snackbar",
-      text: isOk ? "Принято" : "Отказано"
+      text: "Отмечено"
     });
 
   } catch (e) {
-    console.error("❌ Ошибка кнопок:", e);
+    console.error("❌ Кнопки:", e);
   }
 });
 
 
 // =======================
-// ОТПРАВКА НОВЫХ ОТЧЕТОВ В ВК
+// НОВЫЕ ОТЧЕТЫ → ВК + АВТО НАЧИСЛЕНИЕ
 // =======================
 
 db.ref("reports").on("child_added", async (snap) => {
   const report = snap.val();
   const reportId = snap.key;
 
-  if (!report) return;
-  if (report.vkMessageId) return;
+  if (!report || report.vkMessageId) return;
+
+  const peerSnap = await db.ref("settings/chatPeerId").once("value");
+  const peerId = peerSnap.val();
+
+  if (!peerId) {
+    console.log("❌ Беседа не привязана. Напишите /bind");
+    return;
+  }
 
   console.log("📩 Новый отчет:", reportId);
 
@@ -124,25 +108,26 @@ db.ref("reports").on("child_added", async (snap) => {
 
 🛠 Работа: ${report.work}
 ⚖️ Наказания: ${report.punishments}
-📊 К начислению: ${report.score} баллов`;
+📊 Баллы: ${report.score}`;
 
   try {
+    // ✅ авто начисление баллов
+    const points = parseInt(report.score) || 0;
+
+    await db.ref(`users/${report.author}/score`)
+      .transaction(s => (s || 0) + points);
+
     const keyboard = Keyboard.builder()
       .inline()
       .callbackButton({
-        label: "✅ Одобрить",
-        payload: { reportId, action: "ok" },
-        color: "positive"
-      })
-      .callbackButton({
-        label: "❌ Отказать",
-        payload: { reportId, action: "no" },
-        color: "negative"
+        label: "👀 Проверено",
+        payload: { reportId },
+        color: "primary"
       });
 
     const messageId = await vk.api.messages.send({
-      peer_id: TARGET_PEER_ID,
-      random_id: Math.floor(Math.random() * 1e9),
+      peer_id: peerId,
+      random_id: Date.now(),
       message: text,
       keyboard: keyboard.toString()
     });
@@ -150,14 +135,13 @@ db.ref("reports").on("child_added", async (snap) => {
     await db.ref(`reports/${reportId}`).update({
       vkMessageId: messageId,
       vkText: text,
-      status: "pending"
+      status: "auto_approved"
     });
 
-    console.log("✅ Отправлено в беседу:", messageId);
+    console.log("✅ Отправлено + баллы начислены");
 
   } catch (e) {
-    console.error("❌ Ошибка отправки VK:");
-    console.error(e);
+    console.error("❌ VK SEND:", e);
   }
 });
 
