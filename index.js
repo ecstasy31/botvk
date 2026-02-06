@@ -61,8 +61,8 @@ vk.updates.on("message_event", async (ctx) => {
   }
 
   const adminId = ctx.userId;
-  const [adminInfo] = await vk.api.users.get({ user_ids: adminId });
-  const adminName = `${adminInfo.first_name} ${adminInfo.last_name}`;
+  const [admin] = await vk.api.users.get({ user_ids: adminId });
+  const adminName = `${admin.first_name} ${admin.last_name}`;
 
   const newStatus = action === "ok" ? "approved" : "rejected";
 
@@ -90,7 +90,7 @@ vk.updates.on("message_event", async (ctx) => {
     peer_id: CHAT_ID,
     message_id: report.vkMessageId,
     message: report.vkText + `\n\n${statusText}`,
-    keyboard: Keyboard.empty()
+    keyboard: Keyboard.builder().clear()
   });
 
   await db.ref("logs").push({
@@ -140,7 +140,8 @@ ${report.work}
     }
   }
 
-  const keyboard = Keyboard.inline()
+  const keyboard = Keyboard.builder()
+    .inline()
     .callbackButton({
       label: "✅ Одобрить",
       payload: { reportId, action: "ok" },
@@ -171,5 +172,5 @@ ${report.work}
 
 // ================= HTTP =================
 http.createServer((_, res) => {
-  res.end("VK bot alive");
+  res.end("VK report bot alive");
 }).listen(process.env.PORT || 3000);
