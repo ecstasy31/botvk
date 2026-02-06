@@ -46,23 +46,18 @@ async function uploadPhoto(base64) {
   return `photo${saved[0].owner_id}_${saved[0].id}`;
 }
 
-// ================= BUTTON HANDLER =================
+// ================= CALLBACK =================
 vk.updates.on("message_event", async (ctx) => {
   const { reportId, action } = ctx.payload;
 
   const snap = await db.ref(`reports/${reportId}`).once("value");
   const report = snap.val();
-
   if (!report || report.status !== "pending") {
-    return ctx.answer({
-      type: "show_snackbar",
-      text: "⚠️ Отчет уже обработан"
-    });
+    return ctx.answer({ type: "show_snackbar", text: "Уже обработан" });
   }
 
-  const adminId = ctx.userId;
-  const [admin] = await vk.api.users.get({ user_ids: adminId });
-  const adminName = `${admin.first_name} ${admin.last_name}`;
+  const [adminUser] = await vk.api.users.get({ user_ids: ctx.userId });
+  const adminName = `${adminUser.first_name} ${adminUser.last_name}`;
 
   const newStatus = action === "ok" ? "approved" : "rejected";
 
@@ -72,7 +67,6 @@ vk.updates.on("message_event", async (ctx) => {
     reviewedAt: Date.now()
   });
 
-  // ===== начисление баллов =====
   if (action === "ok") {
     await db.ref(`users/${report.author}`).transaction(u => {
       if (!u) return u;
@@ -81,29 +75,20 @@ vk.updates.on("message_event", async (ctx) => {
     });
   }
 
-  const statusText =
-    action === "ok"
-      ? `✅ СТАТУС: ОДОБРЕН\n👮 Проверил: ${adminName}`
-      : `❌ СТАТУС: ОТКЛОНЁН\n👮 Проверил: ${adminName}`;
-
-  await vk.api.messages.edit({
-    peer_id: CHAT_ID,
-    message_id: report.vkMessageId,
-    message: report.vkText + `\n\n${statusText}`,
-    keyboard: Keyboard.builder().clear()
-  });
-
-  await db.ref("logs").push({
-    type: "report_review",
-    reportId,
-    status: newStatus,
-    admin: adminName,
-    time: Date.now()
-  });
+  try {
+    await vk.api.messages.edit({
+      peer_id: CHAT_ID,
+      message_id: report.vkMessageId,
+      message: report.vkText + `\n\nСтатус: ${newStatus.toUpperCase()}\nПроверил: ${adminName}`,
+      keyboard: Keyboard.builder().clear()
+    });
+  } catch (e) {
+    console.warn("EDIT MESSAGE FAILED:", e.code);
+  }
 
   await ctx.answer({
     type: "show_snackbar",
-    text: action === "ok" ? "✅ Отчет одобрен" : "❌ Отчет отклонён"
+    text: newStatus === "approved" ? "Одобрено" : "Отклонено"
   });
 });
 
@@ -113,25 +98,19 @@ vk.updates.start();
 db.ref("reports").on("child_added", async (snap) => {
   const reportId = snap.key;
   const report = snap.val();
-
-  if (!report) return;
-  if (report.status && report.status !== "pending") return;
+  if (!report || report.status) return;
 
   const text =
-`📝 ОТЧЕТ МОДЕРАТОРА
+`📝 ОТЧЕТ
 
-👤 Ник: ${report.author}
-🎖 Должность: ${report.rank}
-📅 Дата: ${report.date}
+👤 ${report.author}
+🎖 ${report.rank}
+📅 ${report.date}
 
-📌 Работа:
 ${report.work}
-
-🚫 Наказаний: ${report.score || 0}
 `;
 
   let attachments = [];
-
   if (Array.isArray(report.imgs)) {
     for (const img of report.imgs) {
       try {
@@ -153,24 +132,30 @@ ${report.work}
       color: Keyboard.NEGATIVE_COLOR
     });
 
-  const msgId = await vk.api.messages.send({
-    peer_id: CHAT_ID,
-    random_id: Date.now(),
-    message: text,
-    attachment: attachments.join(","),
-    keyboard
-  });
+  try {
+    const msgId = await vk.api.messages.send({
+      peer_id: CHAT_ID,
+      random_id: Date.now(),
+      message: text,
+      attachment: attachments.join(","),
+      keyboard
+    });
 
-  await db.ref(`reports/${reportId}`).update({
-    status: "pending",
-    vkMessageId: msgId,
-    vkText: text
-  });
-
-  console.log("REPORT SENT:", reportId);
+    await db.ref(`reports/${reportId}`).update({
+      status: "pending",
+      vkMessageId: msgId,
+      vkText: text
+    });
+  } catch (e) {
+    if (e.code === 917) {
+      console.error("❌ BOT HAS NO ACCESS TO CHAT");
+    } else {
+      console.error("VK SEND ERROR:", e);
+    }
+  }
 });
 
 // ================= HTTP =================
 http.createServer((_, res) => {
-  res.end("VK report bot alive");
+  res.end("VK bot alive");
 }).listen(process.env.PORT || 3000);
