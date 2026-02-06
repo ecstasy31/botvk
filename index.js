@@ -25,7 +25,6 @@ if (!admin.apps.length) {
 const db = admin.database();
 let isBotReady = false;
 let botStartTime = null; // Время запуска бота
-let processedUsers = new Set(); // Множество для отслеживания обработанных пользователей
 
 console.log("🚀 Бот запускается...");
 
@@ -188,40 +187,39 @@ async function getChatId() {
 }
 
 // =======================
-// НОВЫЕ ПОЛЬЗОВАТЕЛИ
+// НОВЫЕ ПОЛЬЗОВАТЕЛИ (ИСПРАВЛЕННЫЙ БАГ)
 // =======================
 
-// Обработка новых пользователей
+// Обработка новых пользователей - только те, кто добавился ПОСЛЕ запуска бота
 db.ref("users").on("child_added", async (snap) => {
-    const userId = snap.key;
-    const userData = snap.val();
-    
-    // Проверяем, обрабатывали ли мы этого пользователя ранее
-    if (processedUsers.has(userId)) {
-        console.log(`[USER] Пользователь ${userId} уже был обработан ранее. Пропускаем.`);
-        return;
-    }
-    
-    // Добавляем в обработанные
-    processedUsers.add(userId);
-    
-    // Проверяем, готов ли бот
     if (!isBotReady) {
-        console.log(`[USER] Бот еще не готов. Отложу пользователя ${userId}...`);
-        setTimeout(async () => {
+        console.log(`[USER] Бот еще не готов. Ждем...`);
+        setTimeout(() => {
             if (isBotReady) {
-                await processNewUser(userId, userData);
+                processNewUser(snap);
             }
         }, 3000);
         return;
     }
     
-    await processNewUser(userId, userData);
+    await processNewUser(snap);
 });
 
 // Функция обработки нового пользователя
-async function processNewUser(userId, userData) {
+async function processNewUser(snap) {
+    const userId = snap.key;
+    const userData = snap.val();
+    
     try {
+        // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем время создания пользователя
+        const userCreationTime = userData.lastSeen || userData.createdAt || Date.now();
+        
+        // Если пользователь был создан ДО запуска бота - пропускаем его
+        if (userCreationTime < botStartTime) {
+            console.log(`[SKIP] Пользователь ${userId} был создан ДО запуска бота (${new Date(userCreationTime).toLocaleString()}). Пропускаем.`);
+            return;
+        }
+        
         // Проверяем, был ли пользователь уже уведомлен
         if (userData.vkNotified) {
             console.log(`[USER] Пользователь ${userId} уже был уведомлен. Пропускаем.`);
@@ -243,7 +241,7 @@ async function processNewUser(userId, userData) {
             message = `🆕 НОВАЯ ЗАЯВКА НА ВСТУПЛЕНИЕ\n\n` +
                      `👤 Ник: ${userData.nick || userId}\n` +
                      `📧 Почта: ${userData.email || "не указана"}\n` +
-                     `🕒 Время регистрации: ${new Date(userData.lastSeen || Date.now()).toLocaleString()}\n` +
+                     `🕒 Время регистрации: ${new Date(userCreationTime).toLocaleString()}\n` +
                      `\n✍️ Требуется одобрение Главного Модератора\n` +
                      `Ссылка: ${SITE_URL}/#profile?user=${encodeURIComponent(userId)}`;
         } else {
@@ -279,11 +277,11 @@ async function processNewUser(userId, userData) {
 // =======================
 
 // При старте бота запоминаем время запуска
-db.ref("reports").once("value", async (snap) => {
+db.ref("reports").once("value", async () => {
     botStartTime = Date.now(); // Запоминаем время запуска бота
     isBotReady = true;
     console.log(`✅ Бот готов к работе. Запущен в: ${new Date(botStartTime).toLocaleString()}`);
-    console.log(`📊 Будут обрабатываться только отчеты, созданные после запуска бота.`);
+    console.log(`📊 Будут обрабатываться только отчеты и пользователи, созданные после запуска бота.`);
 });
 
 // Слушаем добавление новых отчетов
@@ -309,10 +307,10 @@ async function processNewReport(snap) {
     try {
         // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем время создания отчета
         // Если отчет был создан ДО запуска бота - пропускаем его
-        const reportCreationTime = report.timestamp || report.createdAt || 0;
+        const reportCreationTime = report.timestamp || report.createdAt || Date.now();
         
-        // Если отчет не имеет временной метки или был создан до запуска бота
-        if (reportCreationTime && reportCreationTime < botStartTime) {
+        // Если отчет был создан до запуска бота
+        if (reportCreationTime < botStartTime) {
             console.log(`[SKIP] Отчет ${reportId} был создан ДО запуска бота (${new Date(reportCreationTime).toLocaleString()}). Пропускаем.`);
             return;
         }
@@ -504,18 +502,19 @@ vk.updates.start()
         console.log('  /id - узнать ID беседы');
         console.log('  /info [ник] - информация о модераторе');
         console.log('\n✅ Функционал:');
-        console.log('  • Уведомления о новых пользователях');
-        console.log('  • Отправка новых отчетов в чат');
+        console.log('  • Уведомления о новых пользователях (только после запуска)');
+        console.log('  • Отправка новых отчетов в чат (только после запуска)');
         console.log('  • Кнопки для одобрения/отклонения отчетов');
         console.log('  • Загрузка фотографий как изображений');
         console.log(`\n🕒 Бот запущен: ${new Date().toLocaleString()}`);
+        console.log(`⏰ Время запуска бота: ${botStartTime ? new Date(botStartTime).toLocaleString() : 'еще не установлено'}`);
     })
     .catch(console.error);
 
 // Веб-сервер для проверки работоспособности
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`✅ Бот работает\n🕒 Запущен: ${new Date(botStartTime || Date.now()).toLocaleString()}\n📊 Обработано пользователей: ${processedUsers.size}\n🌐 Статус: ${isBotReady ? 'Готов' : 'Загрузка...'}`);
+    res.end(`✅ Бот работает\n🕒 Запущен: ${new Date(botStartTime || Date.now()).toLocaleString()}\n⏰ Время запуска: ${botStartTime ? new Date(botStartTime).toLocaleString() : 'еще не установлено'}\n🌐 Статус: ${isBotReady ? 'Готов' : 'Загрузка...'}`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Веб-сервер запущен на порту ${process.env.PORT || 3000}`);
