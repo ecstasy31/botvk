@@ -39,24 +39,104 @@ vk.updates.on("message_new", async (ctx) => {
 
 
 // =======================
-// КНОПКИ
+// /INFO НИК
+// =======================
+
+vk.updates.on("message_new", async (ctx) => {
+  if (!ctx.text || ctx.isOutbox) return;
+  if (!ctx.text.startsWith("/info")) return;
+
+  const nick = ctx.text.split(" ").slice(1).join(" ").trim();
+  if (!nick) return ctx.send("Укажи ник: /info Ник");
+
+  const snap = await db.ref("users").once("value");
+  const users = snap.val() || {};
+
+  let found = null;
+
+  for (const id in users) {
+    if ((users[id].nickname || "").toLowerCase() === nick.toLowerCase()) {
+      found = users[id];
+      break;
+    }
+  }
+
+  if (!found) return ctx.send("❌ Модератор не найден");
+
+  const reportsSnap = await db.ref("reports").once("value");
+  const reports = reportsSnap.val() || {};
+
+  const userReports = Object.values(reports)
+    .filter(r => r.author === found.nickname);
+
+  const lastReport = userReports.sort((a,b)=>
+    new Date(b.date||0)-new Date(a.date||0))[0];
+
+  const avgScore = userReports.length
+    ? Math.round(
+        userReports.reduce((s,r)=>s+(parseInt(r.score)||0),0)
+        / userReports.length
+      )
+    : 0;
+
+  const text = `
+📋 Информация о модераторе
+
+👤 Ник: ${found.nickname}
+🎖 Роль: ${found.role || "не указана"}
+🟢 Статус: ${found.active ? "активен" : "неактивен"}
+
+📊 Баллы: ${found.score || 0}
+⚠️ Выговоры: ${found.warns || 0}
+🚫 Пропуски: ${found.meetMiss || 0}
+📝 Отчетов подано: ${userReports.length}
+
+📅 Последний отчет: ${lastReport?.date || "нет"}
+📈 Средний уровень отчета: ${avgScore}
+`;
+
+  ctx.send(text);
+});
+
+
+// =======================
+// КНОПКИ ОДОБРИТЬ / ОТКАЗАТЬ
 // =======================
 
 vk.updates.on("message_event", async (ctx) => {
   try {
     if (!ctx.payload) return;
 
-    const { reportId } = ctx.payload;
+    const { reportId, action } = ctx.payload;
 
     const snap = await db.ref(`reports/${reportId}`).once("value");
     const report = snap.val();
-    if (!report) return;
+
+    if (!report || report.status !== "pending") {
+      return ctx.answer({
+        type: "show_snackbar",
+        text: "Уже обработано"
+      });
+    }
 
     const [user] = await vk.api.users.get({ user_ids: ctx.userId });
     const adminName = `${user.first_name} ${user.last_name}`;
 
-    const peerSnap = await db.ref("settings/chatPeerId").once("value");
-    const peerId = peerSnap.val();
+    const peerId = (await db.ref("settings/chatPeerId").once("value")).val();
+
+    const approved = action === "ok";
+
+    // ✅ начисляем только при одобрении
+    if (approved) {
+      const points = parseInt(report.score) || 0;
+      await db.ref(`users/${report.author}/score`)
+        .transaction(s => (s || 0) + points);
+    }
+
+    await db.ref(`reports/${reportId}`).update({
+      status: approved ? "approved" : "rejected",
+      checker: adminName
+    });
 
     await vk.api.messages.edit({
       peer_id: peerId,
@@ -64,13 +144,14 @@ vk.updates.on("message_event", async (ctx) => {
       message:
 `${report.vkText}
 
+${approved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО"}
 👤 Проверил: ${adminName}`,
       keyboard: Keyboard.builder().toString()
     });
 
     ctx.answer({
       type: "show_snackbar",
-      text: "Отмечено"
+      text: approved ? "Одобрено" : "Отклонено"
     });
 
   } catch (e) {
@@ -80,7 +161,7 @@ vk.updates.on("message_event", async (ctx) => {
 
 
 // =======================
-// НОВЫЕ ОТЧЕТЫ → ВК + АВТО НАЧИСЛЕНИЕ
+// НОВЫЙ ОТЧЕТ → В БЕСЕДУ
 // =======================
 
 db.ref("reports").on("child_added", async (snap) => {
@@ -89,15 +170,11 @@ db.ref("reports").on("child_added", async (snap) => {
 
   if (!report || report.vkMessageId) return;
 
-  const peerSnap = await db.ref("settings/chatPeerId").once("value");
-  const peerId = peerSnap.val();
-
+  const peerId = (await db.ref("settings/chatPeerId").once("value")).val();
   if (!peerId) {
-    console.log("❌ Беседа не привязана. Напишите /bind");
+    console.log("⚠️ Нет /bind");
     return;
   }
-
-  console.log("📩 Новый отчет:", reportId);
 
   const text =
 `📝 НОВЫЙ ОТЧЕТ
@@ -111,18 +188,17 @@ db.ref("reports").on("child_added", async (snap) => {
 📊 Баллы: ${report.score}`;
 
   try {
-    // ✅ авто начисление баллов
-    const points = parseInt(report.score) || 0;
-
-    await db.ref(`users/${report.author}/score`)
-      .transaction(s => (s || 0) + points);
-
     const keyboard = Keyboard.builder()
       .inline()
       .callbackButton({
-        label: "👀 Проверено",
-        payload: { reportId },
-        color: "primary"
+        label: "✅ Одобрить",
+        payload: { reportId, action: "ok" },
+        color: "positive"
+      })
+      .callbackButton({
+        label: "❌ Отказать",
+        payload: { reportId, action: "no" },
+        color: "negative"
       });
 
     const messageId = await vk.api.messages.send({
@@ -135,13 +211,13 @@ db.ref("reports").on("child_added", async (snap) => {
     await db.ref(`reports/${reportId}`).update({
       vkMessageId: messageId,
       vkText: text,
-      status: "auto_approved"
+      status: "pending"
     });
 
-    console.log("✅ Отправлено + баллы начислены");
+    console.log("✅ Отчет отправлен");
 
   } catch (e) {
-    console.error("❌ VK SEND:", e);
+    console.error("❌ SEND:", e);
   }
 });
 
