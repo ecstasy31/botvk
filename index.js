@@ -2,27 +2,30 @@ import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import http from "http";
 
-console.log("=== VK REPORT BOT START ===");
+// ================= НАСТРОЙКИ =================
+// Время запуска бота. Все отчеты, созданные РАНЬШЕ этого времени, будут проигнорированы.
+const BOT_START_TIME = Date.now(); 
 
-// ================= VK КОНФИГУРАЦИЯ =================
+console.log("=== VK REPORT BOT ЗАПУЩЕН ===");
+
+// Инициализация VK
 const vk = new VK({
-  token: process.env.VK_TOKEN, // Токен всё еще берем из .env (это секрет)
+  token: process.env.VK_TOKEN,
   apiVersion: "5.199",
-  uploadTimeout: 10000
+  pollingGroupId: Number(process.env.VK_GROUP_ID), // ID группы нужен для корректной работы событий
+  uploadTimeout: 15000
 });
 
-// === ВАШ CHAT_ID (ВСТАВЛЕН СЮДА) ===
-const CHAT_ID = 2000000086; 
+// Целевая беседа
+const TARGET_PEER_ID = 2000000086;
 
-console.log("TARGET CHAT_ID:", CHAT_ID);
-
-// ================= FIREBASE =================
+// Инициализация Firebase
 let serviceAccount;
 try {
-  // Ключ Firebase берем из .env
+  // Если ключ в .env вставлен одной строкой
   serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 } catch (e) {
-  console.error("ОШИБКА: Неверный формат FIREBASE_KEY в .env");
+  console.error("❌ ОШИБКА: Неверный формат JSON в FIREBASE_KEY");
   process.exit(1);
 }
 
@@ -32,166 +35,210 @@ admin.initializeApp({
 });
 
 const db = admin.database();
-console.log("Firebase connected");
+console.log("✅ Firebase подключен");
 
-// ================= ОБРАБОТКА КНОПОК (CALLBACK) =================
+// ================= 1. ОБРАБОТКА КНОПОК (CALLBACK) =================
 vk.updates.on("message_event", async (ctx) => {
   try {
     const { reportId, action } = ctx.payload;
 
-    // Получаем отчет из базы
+    // Ищем отчет в базе
     const snap = await db.ref(`reports/${reportId}`).once("value");
     const report = snap.val();
 
-    // Если отчета нет или он уже обработан
-    if (!report || report.status !== "pending") {
+    // Защита: если отчет удален или уже имеет статус (кроме pending)
+    if (!report || (report.status !== "pending" && report.status !== undefined)) {
       return ctx.answer({
         type: "show_snackbar",
-        text: "Уже обработан или не найден"
+        text: "⚠️ Этот отчет уже обработан кем-то другим!"
       });
     }
 
-    // Получаем имя админа
+    // Получаем имя того, кто нажал кнопку
     const [adminUser] = await vk.api.users.get({ user_ids: ctx.userId });
     const adminName = `${adminUser.first_name} ${adminUser.last_name}`;
     
-    const newStatus = action === "ok" ? "approved" : "rejected";
-    const statusText = action === "ok" ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО";
+    // Определяем статус
+    const isApprove = action === "ok";
+    const newStatus = isApprove ? "approved" : "rejected";
+    const statusEmoji = isApprove ? "✅" : "❌";
+    const statusText = isApprove ? "ОДОБРЕНО" : "ОТКЛОНЕНО";
 
-    // 1. Обновляем статус в БД
+    // --- НАЧИСЛЕНИЕ БАЛЛОВ (ТОЛЬКО ЕСЛИ ОДОБРЕНО) ---
+    if (isApprove) {
+        // Транзакция гарантирует, что баллы не перезапишутся при одновременном доступе
+        // Ищем пользователя по никнейму (предполагаем, что users хранятся по ID или никам)
+        // ВАЖНО: На сайте report.author должен совпадать с ключом в users, либо нужно искать.
+        // Здесь предполагаем, что report.author - это ключ пользователя в БД.
+        // Если report.author это просто текст "NickName", а в базе users/ID, то код нужно менять.
+        // Но пока делаем как в твоем запросе: users/{report.author}
+        
+        await db.ref(`users/${report.author}`).transaction((userData) => {
+            if (!userData) {
+                // Если юзера нет в базе, можно создать или игнорировать.
+                // Вернем null, чтобы не создавать мусор, или создадим структуру.
+                // Лучше вернуть userData как есть, если его нет.
+                return userData; 
+            }
+            // Добавляем баллы
+            userData.score = (userData.score || 0) + (Number(report.score) || 0);
+            return userData;
+        });
+        console.log(`💰 Начислены баллы пользователю ${report.author}`);
+    }
+
+    // --- ОБНОВЛЕНИЕ СТАТУСА ОТЧЕТА ---
     await db.ref(`reports/${reportId}`).update({
       status: newStatus,
       reviewedBy: adminName,
-      reviewedAt: Date.now()
+      reviewedAt: admin.database.ServerValue.TIMESTAMP
     });
 
-    // 2. Если одобрено — начисляем баллы
-    if (action === "ok") {
-      await db.ref(`users/${report.author}`).transaction(u => {
-        if (!u) return u;
-        u.score = (u.score || 0) + (Number(report.score) || 0);
-        return u;
-      });
-    }
-
-    // 3. Редактируем сообщение (убираем кнопки, пишем итог)
+    // --- РЕДАКТИРОВАНИЕ СООБЩЕНИЯ В ВК ---
     try {
       await vk.api.messages.edit({
-        peer_id: CHAT_ID,
-        message_id: report.vkMessageId,
-        message: `${report.vkText}\n\n${statusText}\n👤 Проверил: ${adminName}`,
-        attachment: report.vkAttachments, 
-        keyboard: Keyboard.builder().clear()
+        peer_id: TARGET_PEER_ID,
+        message_id: ctx.conversationMessageId, // или report.vkMessageId
+        message: `${report.vkText}\n\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n${statusEmoji} ИТОГ: ${statusText}\n👤 Проверил: ${adminName}`,
+        attachment: report.vkAttachments || "",
+        keyboard: Keyboard.builder().clear() // Удаляем кнопки
       });
     } catch (err) {
-      console.error("Ошибка редактирования сообщения:", err.message);
+      console.error("⚠️ Не удалось отредактировать сообщение (возможно оно старое):", err.message);
     }
 
-    // 4. Уведомление админу
+    // Уведомление (всплывашка) админу
     await ctx.answer({
       type: "show_snackbar",
-      text: action === "ok" ? "Одобрено" : "Отклонено"
+      text: isApprove ? `✅ Принято (+${report.score} баллов)` : "❌ Отказано"
     });
 
   } catch (e) {
     console.error("CALLBACK ERROR:", e);
+    try { await ctx.answer(); } catch(err){} // Чтобы кнопка перестала крутиться
   }
 });
 
-// Запуск бота
-vk.updates.start().then(() => {
-  console.log("VK Updates Started");
-}).catch(console.error);
-
-// ================= СЛУШАТЕЛЬ НОВЫХ ОТЧЕТОВ =================
-db.ref("reports").on("child_added", async (snap) => {
+// ================= 2. СЛУШАТЕЛЬ НОВЫХ ОТЧЕТОВ =================
+db.ref("reports").limitToLast(10).on("child_added", async (snap) => {
   try {
     const reportId = snap.key;
     const report = snap.val();
 
-    // Пропускаем уже обработанные отчеты
-    if (!report || report.status) return;
+    // --- ФИЛЬТРЫ (ЧТОБЫ НЕ СПАМИЛ СТАРЫМ) ---
+    
+    // 1. Если отчет пустой
+    if (!report) return;
 
-    console.log(`Новый отчет: ${reportId} от ${report.author}`);
+    // 2. Если у отчета уже есть статус (значит он обработан)
+    if (report.status && report.status !== "pending") return;
 
+    // 3. Если отчет уже был отправлен в ВК (есть ID сообщения)
+    if (report.vkMessageId) return;
+
+    // 4. САМОЕ ВАЖНОЕ: Фильтр по времени.
+    // Если timestamp отчета меньше времени запуска бота — игнорируем.
+    // (Если timestamp нет, считаем старым и игнорируем для безопасности)
+    if (!report.timestamp || report.timestamp < BOT_START_TIME) {
+        // console.log(`Скип старого отчета: ${reportId}`);
+        return;
+    }
+
+    console.log(`📩 Новый отчет обнаружен: ${report.author}`);
+
+    // Формируем текст
     const text = 
-`📝 ОТЧЕТ
+`📝 НОВЫЙ ОТЧЕТ
 
-👤 ${report.author}
-🎖 ${report.rank}
-📊 Баллы: ${report.score}
-📅 ${report.date}
+👤 Ник: ${report.nickname || report.author}
+🔰 Должность: ${report.role || report.rank || "Не указана"}
+📊 Баллы за отчет: ${report.score || 0}
+📅 Дата: ${report.date}
 
+🛠 Проделанная работа:
 ${report.work}
-`;
+
+⚖️ Наказаний: ${report.punishments || 0}`;
 
     let attachments = [];
 
     // --- ЗАГРУЗКА ФОТО ---
-    if (Array.isArray(report.imgs) && report.imgs.length > 0) {
+    // Если пришла ссылка (URL)
+    if (report.photoUrl && report.photoUrl.startsWith('http')) {
+        try {
+            const photo = await vk.upload.messagePhoto({
+                source: { value: report.photoUrl },
+                peer_id: TARGET_PEER_ID
+            });
+            attachments.push(photo.toString());
+        } catch (e) {
+            console.error("Ошибка загрузки фото по ссылке:", e.message);
+        }
+    }
+    // Если пришел base64 (массив imgs, как в твоем примере)
+    else if (Array.isArray(report.imgs) && report.imgs.length > 0) {
       const uploadPromises = report.imgs.map(async (base64Str) => {
         try {
-          // Чистим base64
           const base64Data = base64Str.replace(/^data:image\/\w+;base64,/, "");
           const buffer = Buffer.from(base64Data, 'base64');
-          
-          // Загружаем через vk-io
           const photo = await vk.upload.messagePhoto({
             source: buffer,
-            peer_id: CHAT_ID
+            peer_id: TARGET_PEER_ID
           });
-          
-          return photo.toString(); 
+          return photo.toString();
         } catch (err) {
-          console.error("Ошибка загрузки фото:", err.message);
+          console.error("Ошибка фото (base64):", err.message);
           return null;
         }
       });
-
       const results = await Promise.all(uploadPromises);
-      attachments = results.filter(Boolean);
+      attachments = [...attachments, ...results.filter(Boolean)];
     }
 
-    // Клавиатура
+    // --- КЛАВИАТУРА ---
     const keyboard = Keyboard.builder()
       .inline()
       .callbackButton({
         label: "✅ Одобрить",
         payload: { reportId, action: "ok" },
-        color: Keyboard.POSITIVE_COLOR
+        color: Keyboard.POSITIVE_COLOR // Зеленая
       })
       .callbackButton({
-        label: "❌ Отклонить",
+        label: "❌ Отказать",
         payload: { reportId, action: "no" },
-        color: Keyboard.NEGATIVE_COLOR
+        color: Keyboard.NEGATIVE_COLOR // Красная
       });
 
-    // Отправка сообщения в беседу
+    // --- ОТПРАВКА ---
     const sentMsg = await vk.api.messages.send({
-      peer_id: CHAT_ID,
-      random_id: Math.floor(Math.random() * 1000000000),
+      peer_id: TARGET_PEER_ID,
+      random_id: Date.now(),
       message: text,
       attachment: attachments.join(","),
-      keyboard
+      keyboard: keyboard
     });
 
-    console.log("Сообщение отправлено, ID:", sentMsg);
+    console.log(`✅ Отправлено в беседу (msg_id: ${sentMsg})`);
 
-    // Сохраняем данные сообщения в БД
+    // Сохраняем ID сообщения в базу, чтобы бот знал, что это сообщение связано с этим отчетом
+    // И ставим статус pending (ожидает проверки)
     await db.ref(`reports/${reportId}`).update({
       status: "pending",
       vkMessageId: sentMsg,
-      vkText: text,
+      vkText: text, // Сохраняем текст, чтобы потом вернуть его при редактировании
       vkAttachments: attachments.join(",") 
     });
 
   } catch (e) {
-    console.error("VK SEND ERROR:", e);
+    console.error("SEND ERROR:", e);
   }
 });
 
-// ================= HTTP СЕРВЕР =================
+// Запуск Polling
+vk.updates.start().catch(console.error);
+
+// HTTP сервер (чтобы Render не усыплял бота сразу, если ты используешь UptimeRobot)
 http.createServer((_, res) => {
   res.writeHead(200);
-  res.end(`Bot running. Target Chat ID: ${CHAT_ID}`);
+  res.end(`Bot is alive. Start time: ${new Date(BOT_START_TIME).toISOString()}`);
 }).listen(process.env.PORT || 3000);
