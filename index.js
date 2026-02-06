@@ -12,7 +12,7 @@ const vk = new VK({
     pollingGroupId: Number(process.env.VK_GROUP_ID)
 });
 
-const SITE_URL = "https://ваш-сайт.com";
+const SITE_URL = "https://ecstasy31.github.io/moderation-panel/?clckid=dd788c52";
 
 if (!admin.apps.length) {
     admin.initializeApp({
@@ -88,7 +88,7 @@ vk.updates.on("message_new", async (ctx) => {
 });
 
 // =======================
-// ОБРАБОТКА КНОПОК (ИСПРАВЛЕНО - картинки остаются)
+// ОБРАБОТКА КНОПОК (ИСПРАВЛЕНО - фотографии сохраняются)
 // =======================
 
 vk.updates.on("message_event", async (ctx) => {
@@ -131,21 +131,123 @@ vk.updates.on("message_event", async (ctx) => {
             `📊 Баллы: ${report.score || 0}\n\n` +
             `${statusIcon}\n👤 Проверил: ${adminName}`;
 
-        // РЕДАКТИРУЕМ СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ, А НЕ УДАЛЯЕМ ЕГО
-        await vk.api.messages.edit({
-            peer_id: ctx.peerId,
-            conversation_message_id: ctx.conversationMessageId,
-            message: newText,
-            // Клавиатуру убираем (пустая строка)
-            keyboard: Keyboard.builder().inline().toString()
-        });
-
-        console.log(`✅ Отчет ${reportId} обработан: ${isApproved ? 'одобрен' : 'отклонен'}`);
+        // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: получаем текущее сообщение, чтобы сохранить attachment
+        try {
+            // Получаем информацию о текущем сообщении
+            const messages = await vk.api.messages.getByConversationMessageId({
+                peer_id: ctx.peerId,
+                conversation_message_ids: [ctx.conversationMessageId]
+            });
+            
+            if (messages.items && messages.items[0]) {
+                const currentMessage = messages.items[0];
+                
+                // Сохраняем текущие attachment (фотографии)
+                const currentAttachments = currentMessage.attachments || [];
+                const attachmentStrings = currentAttachments.map(att => {
+                    // Формируем строку attachment в формате VK API
+                    return `${att.type}${att[att.type] ? `${att[att.type].owner_id}_${att[att.type].id}` : ''}`;
+                }).filter(Boolean);
+                
+                console.log(`📎 Найдено attachment: ${attachmentStrings.length}`);
+                
+                // РЕДАКТИРУЕМ СООБЩЕНИЕ С СОХРАНЕНИЕМ ATTACHMENT
+                await vk.api.messages.edit({
+                    peer_id: ctx.peerId,
+                    conversation_message_id: ctx.conversationMessageId,
+                    message: newText,
+                    attachment: attachmentStrings.join(','), // СОХРАНЯЕМ ФОТОГРАФИИ
+                    keyboard: Keyboard.builder().inline().toString() // Убираем кнопки
+                });
+                
+                console.log(`✅ Отчет ${reportId} обработан с сохранением фотографий`);
+            } else {
+                // Если не удалось получить текущее сообщение, редактируем без attachment
+                await vk.api.messages.edit({
+                    peer_id: ctx.peerId,
+                    conversation_message_id: ctx.conversationMessageId,
+                    message: newText,
+                    keyboard: Keyboard.builder().inline().toString()
+                });
+                
+                console.log(`⚠️ Отчет ${reportId} обработан, но фотографии могут быть утеряны`);
+            }
+            
+        } catch (editError) {
+            console.error("Ошибка при получении/редактировании сообщения:", editError);
+            
+            // Альтернативный способ: попробуем заново загрузить фотографии
+            const peerId = await getChatId();
+            if (peerId && report.imgs && Array.isArray(report.imgs) && report.imgs.length > 0) {
+                try {
+                    console.log(`🔄 Пробуем заново загрузить фотографии для отчета ${reportId}`);
+                    
+                    const attachments = [];
+                    for (let i = 0; i < report.imgs.length; i++) {
+                        const imgData = report.imgs[i];
+                        
+                        if (typeof imgData === 'string' && imgData.startsWith('data:image')) {
+                            try {
+                                const base64Data = imgData.replace(/^data:image\/\w+;base64,/, '');
+                                const buffer = Buffer.from(base64Data, 'base64');
+                                
+                                const mimeMatch = imgData.match(/^data:(image\/\w+);base64,/);
+                                const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+                                
+                                const photo = await vk.upload.messagePhoto({
+                                    source: {
+                                        value: buffer,
+                                        contentType: mimeType,
+                                        filename: `report_${reportId}_edited_${i}.${mimeType.split('/')[1]}`
+                                    },
+                                    peer_id: Number(peerId)
+                                });
+                                
+                                attachments.push(photo.toString());
+                                
+                            } catch (uploadError) {
+                                console.error(`Ошибка загрузки фото ${i+1}:`, uploadError.message);
+                            }
+                        }
+                    }
+                    
+                    // Редактируем с загруженными фотографиями
+                    await vk.api.messages.edit({
+                        peer_id: ctx.peerId,
+                        conversation_message_id: ctx.conversationMessageId,
+                        message: newText,
+                        attachment: attachments.join(','),
+                        keyboard: Keyboard.builder().inline().toString()
+                    });
+                    
+                    console.log(`✅ Фотографии перезагружены для отчета ${reportId}`);
+                    
+                } catch (reuploadError) {
+                    console.error("Ошибка при перезагрузке фотографий:", reuploadError);
+                    
+                    // Если все не удалось, просто редактируем текст
+                    await vk.api.messages.edit({
+                        peer_id: ctx.peerId,
+                        conversation_message_id: ctx.conversationMessageId,
+                        message: newText,
+                        keyboard: Keyboard.builder().inline().toString()
+                    });
+                }
+            } else {
+                // Просто редактируем текст без фотографий
+                await vk.api.messages.edit({
+                    peer_id: ctx.peerId,
+                    conversation_message_id: ctx.conversationMessageId,
+                    message: newText,
+                    keyboard: Keyboard.builder().inline().toString()
+                });
+            }
+        }
 
     } catch (e) { 
         console.error("Ошибка кнопок:", e); 
         
-        // Если не удалось отредактировать, пробуем отправить новое сообщение
+        // Запасной вариант: отправляем новое сообщение с результатом
         try {
             const payload = ctx.eventPayload;
             if (!payload || !payload.reportId) return;
@@ -172,12 +274,49 @@ vk.updates.on("message_event", async (ctx) => {
                 `📊 Баллы: ${report.score || 0}\n\n` +
                 `${statusIcon}\n👤 Проверил: ${adminName}`;
             
+            // Пробуем заново загрузить фотографии для нового сообщения
+            const peerId = await getChatId();
+            const attachments = [];
+            
+            if (peerId && report.imgs && Array.isArray(report.imgs)) {
+                for (let i = 0; i < report.imgs.length; i++) {
+                    const imgData = report.imgs[i];
+                    
+                    if (typeof imgData === 'string' && imgData.startsWith('data:image')) {
+                        try {
+                            const base64Data = imgData.replace(/^data:image\/\w+;base64,/, '');
+                            const buffer = Buffer.from(base64Data, 'base64');
+                            
+                            const mimeMatch = imgData.match(/^data:(image\/\w+);base64,/);
+                            const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+                            
+                            const photo = await vk.upload.messagePhoto({
+                                source: {
+                                    value: buffer,
+                                    contentType: mimeType,
+                                    filename: `report_${reportId}_backup_${i}.${mimeType.split('/')[1]}`
+                                },
+                                peer_id: Number(peerId)
+                            });
+                            
+                            attachments.push(photo.toString());
+                            
+                        } catch (uploadError) {
+                            console.error(`Ошибка загрузки фото ${i+1}:`, uploadError.message);
+                        }
+                    }
+                }
+            }
+            
             // Отправляем новое сообщение как запасной вариант
             await vk.api.messages.send({
                 peer_id: ctx.peerId,
                 random_id: Math.floor(Math.random() * 2000000000),
-                message: newText
+                message: newText,
+                attachment: attachments.join(',')
             });
+            
+            console.log(`⚠️ Отчет ${reportId} отправлен новым сообщением`);
             
         } catch (sendError) {
             console.error("Не удалось отправить сообщение об ошибке:", sendError);
@@ -383,16 +522,19 @@ async function processNewReport(reportId, report) {
             }
         }
         
+        // Сохраняем attachment ID для последующего использования
+        const attachmentIds = attachments.join(',');
+        
         const keyboard = Keyboard.builder()
             .inline()
             .callbackButton({ 
                 label: "✅ Одобрить", 
-                payload: { reportId, action: "ok" }, 
+                payload: { reportId, action: "ok", attachments: attachmentIds }, 
                 color: "positive" 
             })
             .callbackButton({ 
                 label: "❌ Отказать", 
-                payload: { reportId, action: "no" }, 
+                payload: { reportId, action: "no", attachments: attachmentIds }, 
                 color: "negative" 
             })
             .toString();
@@ -401,15 +543,16 @@ async function processNewReport(reportId, report) {
             peer_id: Number(peerId),
             random_id: Math.floor(Math.random() * 2000000000),
             message: text,
-            attachment: attachments.join(','),
+            attachment: attachmentIds,
             keyboard: keyboard
         });
         
-        console.log(`✅ Отчет ${reportId} отправлен`);
+        console.log(`✅ Отчет ${reportId} отправлен с ${attachments.length} фото`);
         
         await db.ref(`reports/${reportId}`).update({
             vkMessageId: msgId,
             vkText: text,
+            vkAttachments: attachmentIds, // Сохраняем ID attachment
             status: "pending",
             processedAt: Date.now(),
             botProcessed: true
@@ -431,6 +574,7 @@ async function startBot() {
         
         console.log('🤖 Бот успешно запущен');
         console.log('📊 Команды: /bind, /id, /info [ник]');
+        console.log('📸 Фотографии сохраняются при одобрении/отклонении');
         
     } catch (error) {
         console.error('❌ Ошибка запуска:', error);
