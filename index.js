@@ -87,6 +87,10 @@ vk.updates.on("message_new", async (ctx) => {
     }
 });
 
+// =======================
+// ОБРАБОТКА КНОПОК (ИСПРАВЛЕНО - картинки остаются)
+// =======================
+
 vk.updates.on("message_event", async (ctx) => {
     try {
         const payload = ctx.eventPayload;
@@ -115,14 +119,70 @@ vk.updates.on("message_event", async (ctx) => {
         });
 
         const statusIcon = isApproved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО";
+        
+        // СОЗДАЕМ НОВЫЙ ТЕКСТ С УЧЕТОМ СТАТУСА
+        const newText = 
+            `📝 ОТЧЕТ ${isApproved ? 'ОДОБРЕН' : 'ОТКЛОНЕН'}\n\n` +
+            `👤 Ник: ${report.author || "—"}\n` +
+            `🔰 Должность: ${report.role || "—"}\n` +
+            `📅 Дата: ${report.date || "—"}\n\n` +
+            `🛠 Работа: ${report.work || "—"}\n` +
+            `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
+            `📊 Баллы: ${report.score || 0}\n\n` +
+            `${statusIcon}\n👤 Проверил: ${adminName}`;
+
+        // РЕДАКТИРУЕМ СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ, А НЕ УДАЛЯЕМ ЕГО
         await vk.api.messages.edit({
             peer_id: ctx.peerId,
             conversation_message_id: ctx.conversationMessageId,
-            message: `${report.vkText}\n\n${statusIcon}\n👤 Проверил: ${adminName}`,
+            message: newText,
+            // Клавиатуру убираем (пустая строка)
             keyboard: Keyboard.builder().inline().toString()
         });
 
-    } catch (e) { console.error("Ошибка кнопок:", e); }
+        console.log(`✅ Отчет ${reportId} обработан: ${isApproved ? 'одобрен' : 'отклонен'}`);
+
+    } catch (e) { 
+        console.error("Ошибка кнопок:", e); 
+        
+        // Если не удалось отредактировать, пробуем отправить новое сообщение
+        try {
+            const payload = ctx.eventPayload;
+            if (!payload || !payload.reportId) return;
+            
+            const { reportId, action } = payload;
+            const reportRef = db.ref(`reports/${reportId}`);
+            const snap = await reportRef.once("value");
+            const report = snap.val();
+            
+            if (!report) return;
+            
+            const [adminUser] = await vk.api.users.get({ user_ids: ctx.userId });
+            const adminName = `${adminUser.first_name} ${adminUser.last_name}`;
+            const isApproved = action === "ok";
+            const statusIcon = isApproved ? "✅ ОДОБРЕНО" : "❌ ОТКЛОНЕНО";
+            
+            const newText = 
+                `📝 ОТЧЕТ ${isApproved ? 'ОДОБРЕН' : 'ОТКЛОНЕН'}\n\n` +
+                `👤 Ник: ${report.author || "—"}\n` +
+                `🔰 Должность: ${report.role || "—"}\n` +
+                `📅 Дата: ${report.date || "—"}\n\n` +
+                `🛠 Работа: ${report.work || "—"}\n` +
+                `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
+                `📊 Баллы: ${report.score || 0}\n\n` +
+                `${statusIcon}\n👤 Проверил: ${adminName}`;
+            
+            // Отправляем новое сообщение как запасной вариант
+            await vk.api.messages.send({
+                peer_id: ctx.peerId,
+                random_id: Math.floor(Math.random() * 2000000000),
+                message: newText
+            });
+            
+        } catch (sendError) {
+            console.error("Не удалось отправить сообщение об ошибке:", sendError);
+        }
+    }
 });
 
 // =======================
@@ -167,20 +227,17 @@ async function getChatId() {
 // ИНИЦИАЛИЗАЦИЯ ДАННЫХ
 // =======================
 
-// Запоминаем ID существующих пользователей и отчетов при запуске
 let existingUsers = new Set();
 let existingReports = new Set();
 
 async function initializeExistingData() {
     console.log("[INIT] Загружаю существующие данные...");
     
-    // Загружаем существующих пользователей
     const usersSnap = await db.ref("users").once("value");
     const users = usersSnap.val() || {};
     existingUsers = new Set(Object.keys(users));
     console.log(`[INIT] Загружено пользователей: ${existingUsers.size}`);
     
-    // Загружаем существующие отчеты
     const reportsSnap = await db.ref("reports").once("value");
     const reports = reportsSnap.val() || {};
     existingReports = new Set(Object.keys(reports));
@@ -200,16 +257,13 @@ db.ref("users").on("child_added", async (snap) => {
     const userId = snap.key;
     const userData = snap.val();
     
-    // Проверяем, новый ли это пользователь
     if (existingUsers.has(userId)) {
         console.log(`[USER] Пользователь ${userId} уже существовал, пропускаем`);
         return;
     }
     
-    // Добавляем в список существующих
     existingUsers.add(userId);
     
-    // Если уже был уведомлен, пропускаем
     if (userData.vkNotified) {
         console.log(`[USER] Пользователь ${userId} уже был уведомлен`);
         return;
@@ -264,16 +318,13 @@ db.ref("reports").on("child_added", async (snap) => {
     const reportId = snap.key;
     const report = snap.val();
     
-    // Проверяем, новый ли это отчет
     if (existingReports.has(reportId)) {
         console.log(`[REPORT] Отчет ${reportId} уже существовал, пропускаем`);
         return;
     }
     
-    // Добавляем в список существующих
     existingReports.add(reportId);
     
-    // Если уже был обработан, пропускаем
     if (report.vkMessageId || report.botProcessed) {
         console.log(`[REPORT] Отчет ${reportId} уже был обработан`);
         return;
@@ -325,6 +376,9 @@ async function processNewReport(reportId, report) {
                     } catch (error) {
                         console.error(`Ошибка загрузки фото ${i+1}:`, error.message);
                     }
+                } else if (typeof imgData === 'string' && (imgData.startsWith('http://') || imgData.startsWith('https://'))) {
+                    const uploaded = await uploadImageToVK(imgData, peerId);
+                    if (uploaded) attachments.push(uploaded);
                 }
             }
         }
@@ -372,10 +426,7 @@ async function processNewReport(reportId, report) {
 
 async function startBot() {
     try {
-        // Инициализируем данные
         await initializeExistingData();
-        
-        // Запускаем VK бота
         await vk.updates.start();
         
         console.log('🤖 Бот успешно запущен');
