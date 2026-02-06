@@ -12,7 +12,7 @@ const vk = new VK({
     pollingGroupId: Number(process.env.VK_GROUP_ID)
 });
 
-// Укажи основной адрес сайта БЕЗ слеша в конце
+// Укажи основной адрес сайта
 const SITE_URL = "https://ваш-сайт.com"; 
 
 if (!admin.apps.length) {
@@ -23,7 +23,7 @@ if (!admin.apps.length) {
 }
 
 const db = admin.database();
-let isBotReady = false; // Флаг для игнорирования старых отчетов при старте
+let isBotReady = false; // Флаг для пропуска старых отчетов
 
 console.log("🚀 Бот запускается...");
 
@@ -65,20 +65,20 @@ vk.updates.on("message_new", async (ctx) => {
         const lastReport = userReports.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))[0];
         const avgScore = userReports.length ? Math.round(userReports.reduce((s, r) => s + (Number(r.score) || 0), 0) / userReports.length) : 0;
 
-        // Ссылка на конкретного пользователя на сайте
+        // Кнопка ведет сразу в профиль на сайте (если сайт поддерживает роутинг по хешу)
         const personalUrl = `${SITE_URL}/#profile?user=${encodeURIComponent(targetKey || nickRaw)}`;
 
         return ctx.send({
             message: `📋 ИНФОРМАЦИЯ\n👤 Ник: ${targetKey || nickRaw}\n📧 Почта: ${userEntry?.email || "нет"}\n🎖 Роль: ${userEntry?.role || lastReport?.role || "нет"}\n🟢 Статус: ${userEntry?.active ? "активен" : "неактивен"}\n📊 Баллы: ${userEntry?.score || 0}\n📝 Отчетов: ${userReports.length}\n📅 Последний: ${lastReport?.date || "нет"}\n📈 Средний балл: ${avgScore}`,
             keyboard: Keyboard.builder()
                 .inline()
-                .urlButton({ label: "🌍 Открыть в таблице", url: personalUrl })
+                .urlButton({ label: "🌍 Посмотреть в таблице", url: personalUrl })
         });
     }
 });
 
 // =======================
-// ОБРАБОТКА КНОПОК
+// ОБРАБОТКА КНОПОК ОДОБРЕНИЯ
 // =======================
 vk.updates.on("message_event", async (ctx) => {
     try {
@@ -118,40 +118,33 @@ vk.updates.on("message_event", async (ctx) => {
 });
 
 // =======================
-// НОВЫЕ ОТЧЕТЫ (ФИКС ПЕРЕЗАГРУЗКИ И ФОТО)
+// НОВЫЕ ОТЧЕТЫ (ИСПРАВЛЕННЫЙ БЛОК ФОТО)
 // =======================
 
-// 1. Сначала помечаем, что бот загрузил текущую базу
-db.ref("reports").once("value", () => {
+// При запуске отмечаем текущие отчеты как "уже прочитанные", чтобы не спамить в чат
+db.ref("reports").once("value", (snapshot) => {
     isBotReady = true;
-    console.log("✅ База данных синхронизирована. Бот готов принимать НОВЫЕ отчеты.");
+    console.log(`✅ Бот синхронизирован. Игнорируем старые отчеты. Ждем новые...`);
 });
 
-// 2. Слушаем добавление новых записей
 db.ref("reports").on("child_added", async (snap) => {
-    // Если бот еще не загрузил старые данные, игнорируем их
-    if (!isBotReady) return;
+    if (!isBotReady) return; // Пропускаем всё, что было в базе до запуска бота
 
     const reportId = snap.key;
     const report = snap.val();
 
-    // На всякий случай проверяем, не отправляли ли мы его уже
     if (report.vkMessageId) return;
 
     try {
-        // Пауза, чтобы данные (особенно фото) точно успели прописаться в Firebase
+        // Задержка 2 сек, чтобы Firebase успел сохранить все данные
         await new Promise(r => setTimeout(r, 2000));
         
         const freshSnap = await db.ref(`reports/${reportId}`).once("value");
         const freshReport = freshSnap.val();
-
         const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
         const peerId = peerIdSnap.val();
 
-        if (!peerId) {
-            console.error("⚠ ID беседы не установлен!");
-            return;
-        }
+        if (!peerId) return console.error("⚠ Ошибка: Не привязана беседа (/bind)");
 
         const text = 
             `📝 НОВЫЙ ОТЧЕТ\n\n` +
@@ -162,20 +155,26 @@ db.ref("reports").on("child_added", async (snap) => {
             `⚖️ Наказания: ${freshReport.punishments || "Нет"}\n` +
             `📊 Баллы: ${freshReport.score || 0}`;
 
-        // --- ЛОГИКА ЗАГРУЗКИ ФОТО ---
+        // --- ЛОГИКА ЗАГРУЗКИ ФОТО (Base64 + Ссылки) ---
         const attachments = [];
         if (freshReport.photos) {
-            const urls = Object.values(freshReport.photos);
-            console.log(`[PHOTO] Найдено ${urls.length} фото для отчета ${reportId}. Загружаю...`);
+            const photoEntries = Object.values(freshReport.photos);
             
-            for (const url of urls) {
+            for (const data of photoEntries) {
                 try {
-                    const res = await fetch(url);
-                    if (!res.ok) continue;
-                    
-                    const buffer = await res.buffer(); // Скачиваем файл в память
-                    
-                    // Загружаем в ВК именно как файл (photo)
+                    let buffer;
+                    if (data.startsWith('data:image')) {
+                        // Если это Base64 (картинка прямо с ПК/телефона)
+                        const base64Data = data.replace(/^data:image\/\w+;base64,/, "");
+                        buffer = Buffer.from(base64Data, 'base64');
+                    } else {
+                        // Если это обычная ссылка
+                        const res = await fetch(data);
+                        if (!res.ok) continue;
+                        buffer = await res.buffer();
+                    }
+
+                    // Загружаем в ВК как обычную фотографию
                     const photo = await vk.upload.messagePhoto({
                         source: { value: buffer },
                         peer_id: Number(peerId)
@@ -183,7 +182,7 @@ db.ref("reports").on("child_added", async (snap) => {
                     
                     attachments.push(photo.toString());
                 } catch (e) {
-                    console.error("Ошибка при загрузке картинки в ВК:", e.message);
+                    console.error("❌ Ошибка загрузки фото:", e.message);
                 }
             }
         }
@@ -198,29 +197,30 @@ db.ref("reports").on("child_added", async (snap) => {
             peer_id: Number(peerId),
             random_id: Math.floor(Math.random() * 2000000000),
             message: text,
-            attachment: attachments, // Теперь тут массив загруженных фото-объектов
+            attachment: attachments,
             keyboard: keyboard
         });
 
+        // Записываем, что отчет отправлен
         await db.ref(`reports/${reportId}`).update({
             vkMessageId: msgId,
             vkText: text,
             status: "pending"
         });
 
-        console.log(`✅ Отчет ${reportId} успешно отправлен с ${attachments.length} фото.`);
+        console.log(`✅ Отчет ${reportId} отправлен в ВК с ${attachments.length} фото.`);
 
     } catch (err) {
-        console.error(`❌ Ошибка обработки отчета ${reportId}:`, err);
+        console.error(`❌ Критическая ошибка:`, err);
     }
 });
 
 // =======================
 // ЗАПУСК
 // =======================
-vk.updates.start().then(() => console.log('🤖 Бот мониторит ВК...')).catch(console.error);
+vk.updates.start().then(() => console.log('🤖 Бот активен!')).catch(console.error);
 
 http.createServer((_, res) => {
     res.writeHead(200);
-    res.end("Bot Work");
+    res.end("Bot is working");
 }).listen(process.env.PORT || 3000);
