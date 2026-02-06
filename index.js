@@ -2,10 +2,9 @@ import { VK, Keyboard } from "vk-io";
 import admin from "firebase-admin";
 import http from "http";
 
-const TARGET_PEER_ID = 2000000086;
-// Бот слушает отчеты, отправленные за последние 10 минут и новее
-const BOT_START_TIME = Date.now() - (10 * 60 * 1000); 
+const TARGET_PEER_ID = 2000000086; // Проверь, что этот ID правильный!
 
+// Инициализация
 const vk = new VK({
   token: process.env.VK_TOKEN,
   apiVersion: "5.199",
@@ -19,42 +18,26 @@ admin.initializeApp({
 });
 const db = admin.database();
 
+// Метка времени старта, чтобы не спамить старыми отчетами при перезагрузке
+// Но делаем запас побольше (1 час), на случай расхождений часов
+const BOT_START_TIME = Date.now() - (60 * 60 * 1000); 
+
 console.log("🚀 Бот запускается...");
 
 // --- КОМАНДЫ ---
 vk.updates.on('message_new', async (ctx) => {
     if (!ctx.text || ctx.isOutbox) return;
-    const text = ctx.text.trim();
-    const args = text.split(' ');
-    const command = args[0].toLowerCase();
-
-    if (command === '/start') {
-        return ctx.send(`✅ Бот активен!\n🆔 ID чата: ${ctx.peerId}\n🎯 Цель: ${TARGET_PEER_ID}`);
+    
+    if (ctx.text === '/start') {
+        return ctx.send(`✅ Бот тут!\nID этого чата: ${ctx.peerId}\nЦелевой ID: ${TARGET_PEER_ID}`);
     }
 
-    if (command === '!test') {
-        return ctx.send("🟢 Проверка связи: ОК. Бот видит сообщения.");
-    }
-
-    if (command === '/info') {
-        const nick = args.slice(1).join(' ');
-        if (!nick) return ctx.send("❌ Напиши: /info Ник");
-
-        const snap = await db.ref(`users/${nick}`).once('value');
-        const user = snap.val();
-
-        if (!user) return ctx.send(`👤 Юзер ${nick} не найден в БД.`);
-
-        return ctx.send(
-            `📊 Статистика: ${nick}\n` +
-            `🔹 Баллы: ${user.score || 0}\n` +
-            `🔹 Роль: ${user.role || 'Нет'}\n` +
-            `🔹 Выговоры: ${user.warns || 0}`
-        );
+    if (ctx.text === '!test') {
+        return ctx.send("🟢 Тест пройден. Бот работает.");
     }
 });
 
-// --- ОБРАБОТКА КНОПОК ---
+// --- КНОПКИ (ОДОБРИТЬ/ОТКАЗАТЬ) ---
 vk.updates.on("message_event", async (ctx) => {
     try {
         const { reportId, action } = ctx.payload;
@@ -62,7 +45,7 @@ vk.updates.on("message_event", async (ctx) => {
         const report = snap.val();
 
         if (!report || report.status !== "pending") {
-            return ctx.answer({ type: "show_snackbar", text: "❌ Уже проверено или не найдено!" });
+            return ctx.answer({ type: "show_snackbar", text: "❌ Уже обработано!" });
         }
 
         const [user] = await vk.api.users.get({ user_ids: ctx.userId });
@@ -70,7 +53,10 @@ vk.updates.on("message_event", async (ctx) => {
         const isOk = action === "ok";
 
         if (isOk) {
-            await db.ref(`users/${report.author}/score`).transaction(s => (s || 0) + (report.score || 10));
+            // Начисляем именно столько баллов, сколько посчитал сайт (report.score)
+            // Если score не указан (старый отчет), даем 1 балл по умолчанию
+            const pointsToAdd = report.score || 1;
+            await db.ref(`users/${report.author}/score`).transaction(s => (s || 0) + pointsToAdd);
         }
 
         await db.ref(`reports/${reportId}`).update({
@@ -91,25 +77,21 @@ vk.updates.on("message_event", async (ctx) => {
     }
 });
 
-// --- ЛИСТЕНЕР ОТЧЕТОВ ---
+// --- СЛУШАТЕЛЬ НОВЫХ ОТЧЕТОВ ---
 db.ref("reports").on("child_added", async (snap) => {
     const report = snap.val();
     const reportId = snap.key;
 
     if (!report || report.vkMessageId) return;
 
-    // Безопасная проверка времени
-    // Если timestamp нет (старые отчеты), считаем их старыми (0)
-    const reportTime = report.timestamp || 0; 
-    
-    if (reportTime < BOT_START_TIME) {
-        // console.log(`[Игнор] Старый отчет от ${report.author}`);
+    // Если у отчета вообще нет метки времени (старый) или она очень старая - игнор
+    if (report.timestamp && report.timestamp < BOT_START_TIME) {
         return;
     }
 
-    console.log(`📩 Получен новый отчет от ${report.author}. Отправляю в ВК...`);
+    console.log(`📩 Отчет от ${report.author}. Попытка отправки...`);
 
-    const text = `📝 НОВЫЙ ОТЧЕТ\n\n👤 Ник: ${report.nickname || report.author}\n🔰 Должность: ${report.role}\n📅 Дата: ${report.date}\n\n🛠 Работа: ${report.work}\n⚖️ Наказания: ${report.punishments}\n📊 Баллы: ${report.score}`;
+    const text = `📝 НОВЫЙ ОТЧЕТ\n\n👤 Ник: ${report.nickname || report.author}\n🔰 Должность: ${report.role}\n📅 Дата: ${report.date}\n\n🛠 Работа: ${report.work}\n⚖️ Наказания: ${report.punishments}\n📊 К начислению: ${report.score} баллов`;
 
     try {
         const keyboard = Keyboard.builder().inline()
@@ -118,7 +100,7 @@ db.ref("reports").on("child_added", async (snap) => {
 
         const sent = await vk.api.messages.send({
             peer_id: TARGET_PEER_ID,
-            random_id: Date.now(),
+            random_id: Date.now(), // Обязательно для бесед
             message: text,
             keyboard
         });
@@ -128,15 +110,15 @@ db.ref("reports").on("child_added", async (snap) => {
             vkText: text
         });
         
-        console.log("✅ Отчет успешно отправлен в чат!");
+        console.log("✅ Успешно отправлено в ВК!");
     } catch (e) {
-        console.error("❌ Ошибка отправки в ВК:", e.message);
+        console.error("❌ Ошибка ВК:", e.message);
     }
 });
 
-// --- ЗАПУСК ПОЛЛИНГА (БЕЗ ЭТОГО БОТ НЕ РАБОТАЕТ) ---
+// Запуск
 vk.updates.start()
     .then(() => console.log("✅ Polling started"))
     .catch(console.error);
 
-http.createServer((req, res) => res.end("Bot is alive!")).listen(process.env.PORT || 3000);
+http.createServer((req, res) => res.end("Bot OK")).listen(process.env.PORT || 3000);
