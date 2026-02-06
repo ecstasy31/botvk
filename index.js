@@ -8,11 +8,19 @@ console.log("=== VK REPORT BOT START ===");
 
 // ================= VK =================
 const vk = new VK({
-  token: process.env.VK_TOKEN
+  token: process.env.VK_TOKEN,
+  apiVersion: "5.199"
 });
 
-const CHAT_ID = Number(process.env.CHAT_ID);
-console.log("CHAT_ID:", 2000000086);
+// если в ENV уже полный peer_id — используй его
+// если там только номер беседы (например 86) — прибавляем
+let CHAT_ID = Number(process.env.CHAT_ID);
+
+if (CHAT_ID < 2000000000) {
+  CHAT_ID = 2000000000 + CHAT_ID;
+}
+
+console.log("CHAT_ID:", CHAT_ID);
 
 // ================= FIREBASE =================
 admin.initializeApp({
@@ -43,64 +51,80 @@ async function uploadPhoto(base64) {
   }).then(r => r.json());
 
   const saved = await vk.api.photos.saveMessagesPhoto(upload);
+
   return `photo${saved[0].owner_id}_${saved[0].id}`;
 }
 
 // ================= CALLBACK =================
 vk.updates.on("message_event", async (ctx) => {
-  const { reportId, action } = ctx.payload;
-
-  const snap = await db.ref(`reports/${reportId}`).once("value");
-  const report = snap.val();
-  if (!report || report.status !== "pending") {
-    return ctx.answer({ type: "show_snackbar", text: "Уже обработан" });
-  }
-
-  const [adminUser] = await vk.api.users.get({ user_ids: ctx.userId });
-  const adminName = `${adminUser.first_name} ${adminUser.last_name}`;
-
-  const newStatus = action === "ok" ? "approved" : "rejected";
-
-  await db.ref(`reports/${reportId}`).update({
-    status: newStatus,
-    reviewedBy: adminName,
-    reviewedAt: Date.now()
-  });
-
-  if (action === "ok") {
-    await db.ref(`users/${report.author}`).transaction(u => {
-      if (!u) return u;
-      u.score = (u.score || 0) + (report.score || 0);
-      return u;
-    });
-  }
-
   try {
+    const { reportId, action } = ctx.payload;
+
+    const snap = await db.ref(`reports/${reportId}`).once("value");
+    const report = snap.val();
+
+    if (!report || report.status !== "pending") {
+      return ctx.answer({
+        event_id: ctx.eventId,
+        type: "show_snackbar",
+        text: "Уже обработан"
+      });
+    }
+
+    const [adminUser] = await vk.api.users.get({
+      user_ids: ctx.userId
+    });
+
+    const adminName = `${adminUser.first_name} ${adminUser.last_name}`;
+    const newStatus = action === "ok" ? "approved" : "rejected";
+
+    await db.ref(`reports/${reportId}`).update({
+      status: newStatus,
+      reviewedBy: adminName,
+      reviewedAt: Date.now()
+    });
+
+    if (action === "ok") {
+      await db.ref(`users/${report.author}`).transaction(u => {
+        if (!u) return u;
+        u.score = (u.score || 0) + (report.score || 0);
+        return u;
+      });
+    }
+
     await vk.api.messages.edit({
       peer_id: CHAT_ID,
       message_id: report.vkMessageId,
-      message: report.vkText + `\n\nСтатус: ${newStatus.toUpperCase()}\nПроверил: ${adminName}`,
+      message:
+        report.vkText +
+        `\n\nСтатус: ${newStatus.toUpperCase()}\nПроверил: ${adminName}`,
       keyboard: Keyboard.builder().clear()
     });
-  } catch (e) {
-    console.warn("EDIT MESSAGE FAILED:", e.code);
-  }
 
-  await ctx.answer({
-    type: "show_snackbar",
-    text: newStatus === "approved" ? "Одобрено" : "Отклонено"
-  });
+    await ctx.answer({
+      event_id: ctx.eventId,
+      type: "show_snackbar",
+      text: newStatus === "approved" ? "Одобрено" : "Отклонено"
+    });
+
+  } catch (e) {
+    console.error("CALLBACK ERROR:", e);
+  }
 });
 
-vk.updates.start();
+vk.updates.start().then(() => {
+  console.log("VK updates started");
+});
 
 // ================= REPORT LISTENER =================
 db.ref("reports").on("child_added", async (snap) => {
-  const reportId = snap.key;
-  const report = snap.val();
-  if (!report || report.status) return;
+  try {
+    const reportId = snap.key;
+    const report = snap.val();
 
-  const text =
+    if (!report || report.status) return;
+
+    const text =
 `📝 ОТЧЕТ
 
 👤 ${report.author}
@@ -110,29 +134,32 @@ db.ref("reports").on("child_added", async (snap) => {
 ${report.work}
 `;
 
-  let attachments = [];
-  if (Array.isArray(report.imgs)) {
-    for (const img of report.imgs) {
-      try {
-        attachments.push(await uploadPhoto(img));
-      } catch {}
+    let attachments = [];
+
+    if (Array.isArray(report.imgs)) {
+      for (const img of report.imgs) {
+        try {
+          const ph = await uploadPhoto(img);
+          attachments.push(ph);
+        } catch (e) {
+          console.warn("PHOTO UPLOAD FAIL");
+        }
+      }
     }
-  }
 
-  const keyboard = Keyboard.builder()
-    .inline()
-    .callbackButton({
-      label: "✅ Одобрить",
-      payload: { reportId, action: "ok" },
-      color: Keyboard.POSITIVE_COLOR
-    })
-    .callbackButton({
-      label: "❌ Отклонить",
-      payload: { reportId, action: "no" },
-      color: Keyboard.NEGATIVE_COLOR
-    });
+    const keyboard = Keyboard.builder()
+      .inline()
+      .callbackButton({
+        label: "✅ Одобрить",
+        payload: { reportId, action: "ok" },
+        color: Keyboard.POSITIVE_COLOR
+      })
+      .callbackButton({
+        label: "❌ Отклонить",
+        payload: { reportId, action: "no" },
+        color: Keyboard.NEGATIVE_COLOR
+      });
 
-  try {
     const msgId = await vk.api.messages.send({
       peer_id: CHAT_ID,
       random_id: Date.now(),
@@ -141,17 +168,16 @@ ${report.work}
       keyboard
     });
 
+    console.log("REPORT SENT:", msgId);
+
     await db.ref(`reports/${reportId}`).update({
       status: "pending",
       vkMessageId: msgId,
       vkText: text
     });
+
   } catch (e) {
-    if (e.code === 917) {
-      console.error("❌ BOT HAS NO ACCESS TO CHAT");
-    } else {
-      console.error("VK SEND ERROR:", e);
-    }
+    console.error("VK SEND ERROR:", e);
   }
 });
 
@@ -159,8 +185,3 @@ ${report.work}
 http.createServer((_, res) => {
   res.end("VK bot alive");
 }).listen(process.env.PORT || 3000);
-
-
-
-
-
