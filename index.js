@@ -516,7 +516,7 @@ async function processNewReport(reportId, report) {
 }
 
 // =======================
-// ОБРАБОТКА ЛОГОВ ДЕЙСТВИЙ (ГЛАВНОЕ ИСПРАВЛЕНИЕ!)
+// ОБРАБОТКА ЛОГОВ ДЕЙСТВИЙ (ТОЛЬКО НУЖНЫЕ ДЕЙСТВИЯ)
 // =======================
 
 // Отслеживаем ВСЕ новые логи
@@ -539,21 +539,52 @@ db.ref("logs").on("child_added", async (snap) => {
     
     console.log(`[LOG] Обрабатываю новый лог: ${logId} - ${log.action || "без действия"}`);
     
-    // Отправляем уведомление в зависимости от типа действия
+    // Проверяем, нужно ли обрабатывать этот лог
+    const shouldProcess = shouldProcessLog(log);
+    if (!shouldProcess) {
+        console.log(`[LOG] Пропускаем лог ${logId} - не относится к нужным действиям`);
+        return;
+    }
+    
+    // Отправляем уведомление
     await processLogAction(logId, log);
 });
+
+function shouldProcessLog(log) {
+    if (!log.action || !log.target || !log.by) {
+        return false;
+    }
+    
+    // ОСТАВЛЯЕМ ТОЛЬКО ЭТИ ДЕЙСТВИЯ:
+    // 1. Покупки в магазине
+    // 2. Рулетка
+    // 3. Взятие/выход из неактива
+    // 4. Снятие выговоров
+    
+    if (log.action.includes("КУПИЛ В МАГАЗИНЕ:")) {
+        return true; // Покупки в магазине
+    }
+    
+    if (log.action.startsWith("РУЛЕТКА:")) {
+        return true; // Рулетка
+    }
+    
+    if (log.action.includes("Взял неактив") || log.action.includes("Вышел из неактива")) {
+        return true; // Неактив
+    }
+    
+    if (log.action.includes("Снял выговор себе") || log.action.includes("Снял выговор (админ)")) {
+        return true; // Снятие выговоров
+    }
+    
+    return false; // Все остальное пропускаем
+}
 
 async function processLogAction(logId, log) {
     try {
         const peerId = await getChatId();
         if (!peerId) {
             console.error(`[LOG] Нет peerId для лога ${logId}`);
-            return;
-        }
-
-        // Пропускаем некоторые типы логов
-        if (!log.action || !log.target || !log.by) {
-            console.log(`[LOG] Пропускаем некорректный лог ${logId}`);
             return;
         }
 
@@ -608,28 +639,6 @@ async function processLogAction(logId, log) {
             message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
             message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
             
-        } else if (log.action.includes("Пропуск собрания")) {
-            icon = "⏰";
-            message = `${icon} ПРОПУСК СОБРАНИЯ\n\n`;
-            message += `👤 Модератор: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `💰 Списано: 5 баллов\n`;
-            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
-            
-        } else if (log.action.includes("Снял выговор себе") || log.action.includes("Снял выговор (админ)")) {
-            icon = "✅";
-            message = `${icon} СНЯТИЕ ВЫГОВОРА\n\n`;
-            message += `👤 Модератор: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            
-            if (log.action.includes("Снял выговор себе")) {
-                message += `💰 Списано: 10 баллов\n`;
-            }
-            
-            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
-            
         } else if (log.action.includes("Взял неактив")) {
             icon = "⏸️";
             // Извлекаем количество дней
@@ -652,63 +661,28 @@ async function processLogAction(logId, log) {
             message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
             message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
             
-        } else if (log.action.includes("Сменил ник")) {
-            icon = "📛";
-            const newName = log.action.replace("Сменил ник на ", "");
-            
-            message = `${icon} СМЕНА НИКА\n\n`;
+        } else if (log.action.includes("Снял выговор себе") || log.action.includes("Снял выговор (админ)")) {
+            icon = "✅";
+            message = `${icon} СНЯТИЕ ВЫГОВОРА\n\n`;
             message += `👤 Модератор: ${userInfo.username}\n`;
             message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `📛 Новый ник: ${newName}\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
             
-        } else if (log.action.includes("Подтвердил почту")) {
-            icon = "📧";
-            message = `${icon} ПОДТВЕРЖДЕНИЕ ПОЧТЫ\n\n`;
-            message += `👤 Пользователь: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `✅ Почта подтверждена\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            if (log.action.includes("Снял выговор себе")) {
+                message += `💰 Списано: 10 баллов\n`;
+            }
             
-        } else if (log.action.includes("Выдал выговор")) {
-            icon = "⚠️";
-            message = `${icon} ВЫГОВОР ВЫДАН\n\n`;
-            message += `👤 Модератор: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `👮‍♂️ Кем выдан: ${log.by}\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
-            
-        } else if (log.action.includes("Отправил отчет")) {
-            icon = "📝";
-            message = `${icon} НОВЫЙ ОТЧЕТ\n\n`;
-            message += `👤 Автор: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
-            message += `\nℹ️ Отчет отправлен на проверку`;
-            
-        } else if (log.action.includes("Одобрил заявку") || log.action.includes("Выдал Админку") || 
-                   log.action.includes("Снял Админку") || log.action.includes("Кикнул")) {
-            icon = "👮‍♂️";
-            message = `${icon} АДМИН ДЕЙСТВИЕ\n\n`;
-            message += `👤 Цель: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `🔧 Действие: ${log.action}\n`;
-            message += `👮‍♂️ Админ: ${log.by}\n`;
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
             message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
             
         } else {
-            // Для всех остальных действий
-            message = `${icon} СИСТЕМНОЕ ДЕЙСТВИЕ\n\n`;
-            message += `👤 Пользователь: ${userInfo.username}\n`;
-            message += `🏢 Должность: ${userInfo.rank}\n`;
-            message += `🔧 Действие: ${log.action}\n`;
-            message += `👮‍♂️ Инициатор: ${log.by}\n`;
-            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            // Не должно сюда попадать, но на всякий случай
+            console.log(`[LOG] Неизвестный тип действия: ${log.action}`);
+            return;
         }
 
         // Добавляем ссылку на профиль
         message += `\n━━━━━━━━━━━━━━━━━━━\n`;
-        message += `🔗 Профиль: @ash_ecstasy ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
+        message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
 
         // Отправляем сообщение
         await vk.api.messages.send({
@@ -745,6 +719,13 @@ async function checkUnprocessedLogs() {
             if (processedLogs.has(logId)) continue;
             if (log.vkProcessed) {
                 processedLogs.add(logId);
+                continue;
+            }
+            
+            // Проверяем, нужно ли обрабатывать этот лог
+            if (!shouldProcessLog(log)) {
+                processedLogs.add(logId);
+                await db.ref(`logs/${logId}`).update({ vkProcessed: true });
                 continue;
             }
             
@@ -839,7 +820,8 @@ async function startBot() {
         console.log('📊 Команды: /bind, /id, /info [ник]');
         console.log('🛒 Отслеживание покупок в магазине');
         console.log('🎰 Отслеживание рулетки');
-        console.log('📝 Отслеживание всех действий пользователей');
+        console.log('⏸️ Отслеживание неактива');
+        console.log('✅ Отслеживание снятия выговоров');
         console.log('📸 Максимум 10 фото в одном сообщении');
         console.log('🛡  Защита от дублирования сообщений');
         
@@ -853,8 +835,7 @@ startBot();
 // Веб-сервер для проверки
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n📜 Обработано логов: ${processedLogs.size}\n🛒 Отслеживает покупки\n🎰 Отслеживает рулетку`);
+    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n📜 Обработано логов: ${processedLogs.size}\n🛒 Отслеживает покупки\n🎰 Отслеживает рулетку\n⏸️ Отслеживает неактив\n✅ Отслеживает снятие выговоров`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
-
