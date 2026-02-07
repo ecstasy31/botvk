@@ -238,7 +238,7 @@ async function getUserInfo(userId) {
         const userSnap = await db.ref(`users/${userId}`).once("value");
         const userData = userSnap.val();
         
-        if (!userData) return { username: userId, rank: "Не указано" };
+        if (!userData) return { username: userId, rank: "Не указано", score: 0 };
         
         return {
             username: userData.nick || userId,
@@ -247,7 +247,7 @@ async function getUserInfo(userId) {
         };
     } catch (error) {
         console.error(`[USER INFO] Ошибка получения данных пользователя ${userId}:`, error);
-        return { username: userId, rank: "Не указано" };
+        return { username: userId, rank: "Не указано", score: 0 };
     }
 }
 
@@ -262,6 +262,7 @@ async function getChatId() {
 
 let existingUsers = new Set();
 let existingReports = new Set();
+let processedLogs = new Set();
 
 async function initializeExistingData() {
     console.log("[INIT] Загружаю существующие данные...");
@@ -275,6 +276,12 @@ async function initializeExistingData() {
     const reports = reportsSnap.val() || {};
     existingReports = new Set(Object.keys(reports));
     console.log(`[INIT] Загружено отчетов: ${existingReports.size}`);
+    
+    // Загружаем уже обработанные логи
+    const logsSnap = await db.ref("logs").once("value");
+    const logs = logsSnap.val() || {};
+    processedLogs = new Set(Object.keys(logs));
+    console.log(`[INIT] Загружено логов: ${processedLogs.size}`);
     
     isBotReady = true;
     console.log("[INIT] Бот готов к работе!");
@@ -509,361 +516,344 @@ async function processNewReport(reportId, report) {
 }
 
 // =======================
-// ОБРАБОТКА ПОКУПОК В МАГАЗИНЕ (С САЙТА)
+// ОБРАБОТКА ЛОГОВ ДЕЙСТВИЙ (ГЛАВНОЕ ИСПРАВЛЕНИЕ!)
 // =======================
 
-// Отслеживаем покупки товаров из магазина на сайте
-db.ref("shop_purchases").on("child_added", async (snap) => {
-    if (!isBotReady) return;
-    
-    const purchaseId = snap.key;
-    const purchase = snap.val();
-    
-    // Проверяем, не обрабатывалась ли покупка уже
-    if (purchase.vkNotified) {
-        console.log(`[SHOP PURCHASE] Покупка ${purchaseId} уже была уведомлена`);
-        return;
-    }
-    
-    console.log(`[SHOP PURCHASE] Обрабатываю покупку в магазине: ${purchaseId}`);
-    await processShopPurchase(purchaseId, purchase);
-});
-
-async function processShopPurchase(purchaseId, purchase) {
-    try {
-        const peerId = await getChatId();
-        if (!peerId) return;
-
-        // Получаем информацию о пользователе
-        const userInfo = await getUserInfo(purchase.userId);
-        
-        // Формируем сообщение о покупке
-        let message = `🛒 НОВАЯ ПОКУПКА В МАГАЗИНЕ\n\n`;
-        
-        message += `👤 Покупатель: ${userInfo.username}\n`;
-        message += `🏢 Должность: ${userInfo.rank}\n`;
-        
-        if (purchase.itemName) {
-            message += `📦 Товар: ${purchase.itemName}\n`;
-        }
-        
-        if (purchase.price !== undefined) {
-            message += `💰 Стоимость: ${purchase.price} баллов\n`;
-        }
-        
-        if (userInfo.score !== undefined) {
-            message += `🏦 Баланс до покупки: ${userInfo.score + purchase.price}\n`;
-            message += `🏦 Баланс после покупки: ${userInfo.score}\n`;
-        }
-        
-        if (purchase.timestamp) {
-            const date = new Date(purchase.timestamp);
-            message += `🕒 Время: ${date.toLocaleString("ru-RU")}\n`;
-        }
-        
-        // Добавляем разделитель
-        message += `\n━━━━━━━━━━━━━━━━━━━\n`;
-        
-        message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(purchase.userId)}`;
-
-        await vk.api.messages.send({
-            peer_id: Number(peerId),
-            random_id: Math.floor(Math.random() * 2000000000),
-            message: message
-        });
-        
-        console.log(`✅ Уведомление о покупке ${purchaseId} отправлено`);
-        
-        // Помечаем покупку как обработанную
-        await db.ref(`shop_purchases/${purchaseId}`).update({
-            vkNotified: true,
-            vkNotificationTime: Date.now()
-        });
-        
-    } catch (error) {
-        console.error(`❌ Ошибка при обработке покупки ${purchaseId}:`, error);
-    }
-}
-
-// Также отслеживаем логи покупок, которые записываются функцией buyItem()
+// Отслеживаем ВСЕ новые логи
 db.ref("logs").on("child_added", async (snap) => {
     if (!isBotReady) return;
     
     const logId = snap.key;
     const log = snap.val();
     
-    // Пропускаем логи, которые не о покупках
-    if (!log.action || !log.action.includes("КУПИЛ В МАГАЗИНЕ:")) return;
-    
     // Проверяем, не обрабатывался ли лог уже
-    if (log.vkNotified) {
-        console.log(`[SHOP LOG] Лог ${logId} уже был обработан`);
+    if (processedLogs.has(logId)) {
+        console.log(`[LOG] Лог ${logId} уже был обработан`);
         return;
     }
     
-    console.log(`[SHOP LOG] Обрабатываю лог покупки: ${logId}`);
+    processedLogs.add(logId);
     
-    // Создаем запись о покупке
-    const purchaseData = {
-        userId: log.target,
-        itemName: log.action.replace("КУПИЛ В МАГАЗИНЕ: ", ""),
-        price: 0, // Цену нужно будет извлечь из лога или другого источника
-        timestamp: Date.now(),
-        vkNotified: true,
-        vkNotificationTime: Date.now()
-    };
+    // Помечаем лог как обработанный
+    await db.ref(`logs/${logId}`).update({ vkProcessed: true });
     
-    // Сохраняем покупку для истории
-    await db.ref(`shop_purchases/${logId}`).set(purchaseData);
+    console.log(`[LOG] Обрабатываю новый лог: ${logId} - ${log.action || "без действия"}`);
     
-    // Отправляем уведомление о покупке
+    // Отправляем уведомление в зависимости от типа действия
+    await processLogAction(logId, log);
+});
+
+async function processLogAction(logId, log) {
     try {
         const peerId = await getChatId();
-        if (!peerId) return;
-        
+        if (!peerId) {
+            console.error(`[LOG] Нет peerId для лога ${logId}`);
+            return;
+        }
+
+        // Пропускаем некоторые типы логов
+        if (!log.action || !log.target || !log.by) {
+            console.log(`[LOG] Пропускаем некорректный лог ${logId}`);
+            return;
+        }
+
+        // Получаем информацию о пользователе
         const userInfo = await getUserInfo(log.target);
         
-        let message = `🛒 ПОКУПКА ИЗ ЛОГОВ\n\n`;
-        message += `👤 Покупатель: ${userInfo.username}\n`;
-        message += `🏢 Должность: ${userInfo.rank}\n`;
-        message += `📦 Товар: ${log.action.replace("КУПИЛ В МАГАЗИНЕ: ", "")}\n`;
-        message += `🕒 Время: ${new Date(log.time).toLocaleString("ru-RU")}\n`;
-        message += `👤 Инициатор: ${log.by}\n`;
-        
-        message += `\n━━━━━━━━━━━━━━━━━━━\n`;
-        message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
-        
-        await vk.api.messages.send({
-            peer_id: Number(peerId),
-            random_id: Math.floor(Math.random() * 2000000000),
-            message: message
-        });
-        
-        console.log(`✅ Уведомление о покупке из логов отправлено`);
-        
-    } catch (error) {
-        console.error(`❌ Ошибка при обработке лога покупки:`, error);
-    }
-});
+        let message = "";
+        let icon = "📝";
 
-// =======================
-// ОБРАБОТКА РУЛЕТКИ (С САЙТА)
-// =======================
-
-// Отслеживаем результаты рулетки с сайта
-db.ref("roulette_spins").on("child_added", async (snap) => {
-    if (!isBotReady) return;
-    
-    const spinId = snap.key;
-    const spin = snap.val();
-    
-    // Проверяем, не обрабатывалась ли рулетка уже
-    if (spin.vkNotified) {
-        console.log(`[ROULETTE SPIN] Рулетка ${spinId} уже была уведомлена`);
-        return;
-    }
-    
-    console.log(`[ROULETTE SPIN] Обрабатываю результат рулетки: ${spinId}`);
-    await processRouletteSpin(spinId, spin);
-});
-
-async function processRouletteSpin(spinId, spin) {
-    try {
-        const peerId = await getChatId();
-        if (!peerId) return;
-
-        // Получаем информацию о пользователе
-        const userInfo = await getUserInfo(spin.userId);
-        
-        // Определяем иконку результата
-        let resultIcon = "🎰";
-        let resultText = "";
-        
-        if (spin.result === "win_score") {
-            resultIcon = "🎉";
-            resultText = `Выиграл ${spin.winAmount || 0} баллов`;
-        } else if (spin.result === "win_item") {
-            resultIcon = "💰";
-            resultText = `Выиграл товар: ${spin.winItem || "Неизвестный товар"}`;
-        } else if (spin.result === "lose") {
-            resultIcon = "😔";
-            resultText = "Ничего не выиграл";
-        } else if (spin.result === "jackpot") {
-            resultIcon = "🏆";
-            resultText = "ДЖЕКПОТ!";
-        }
-        
-        // Формируем сообщение о рулетке
-        let message = `${resultIcon} РЕЗУЛЬТАТ РУЛЕТКИ\n\n`;
-        
-        message += `👤 Игрок: ${userInfo.username}\n`;
-        message += `🏢 Должность: ${userInfo.rank}\n`;
-        
-        if (spin.bet !== undefined) {
-            message += `🎯 Ставка: ${spin.bet} баллов\n`;
-        }
-        
-        if (spin.winAmount !== undefined && spin.result === "win_score") {
-            message += `💰 Выигрыш: ${spin.winAmount} баллов\n`;
-        }
-        
-        if (spin.winItem && spin.result === "win_item") {
-            message += `🎁 Выигрыш: ${spin.winItem}\n`;
-        }
-        
-        message += `📊 Результат: ${resultText}\n`;
-        
-        if (spin.balanceBefore !== undefined) {
-            message += `🏦 Баланс до: ${spin.balanceBefore} баллов\n`;
-        }
-        
-        if (spin.balanceAfter !== undefined) {
-            message += `🏦 Баланс после: ${spin.balanceAfter} баллов\n`;
-        }
-        
-        if (spin.timestamp) {
-            const date = new Date(spin.timestamp);
-            message += `🕒 Время: ${date.toLocaleString("ru-RU")}\n`;
-        }
-        
-        // Добавляем разделитель
-        message += `\n━━━━━━━━━━━━━━━━━━━\n`;
-        
-        message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(spin.userId)}`;
-
-        await vk.api.messages.send({
-            peer_id: Number(peerId),
-            random_id: Math.floor(Math.random() * 2000000000),
-            message: message
-        });
-        
-        console.log(`✅ Уведомление о рулетке ${spinId} отправлено`);
-        
-        // Помечаем результат рулетки как обработанный
-        await db.ref(`roulette_spins/${spinId}`).update({
-            vkNotified: true,
-            vkNotificationTime: Date.now()
-        });
-        
-    } catch (error) {
-        console.error(`❌ Ошибка при обработке рулетки ${spinId}:`, error);
-    }
-}
-
-// Также отслеживаем логи рулетки
-db.ref("logs").on("child_added", async (snap) => {
-    if (!isBotReady) return;
-    
-    const logId = snap.key;
-    const log = snap.val();
-    
-    // Пропускаем логи, которые не о рулетке
-    if (!log.action || !log.action.startsWith("РУЛЕТКА:")) return;
-    
-    // Проверяем, не обрабатывался ли лог уже
-    if (log.vkNotified) {
-        console.log(`[ROULETTE LOG] Лог ${logId} уже был обработан`);
-        return;
-    }
-    
-    console.log(`[ROULETTE LOG] Обрабатываю лог рулетки: ${logId}`);
-    
-    // Создаем запись о рулетке
-    const rouletteData = {
-        userId: log.target,
-        result: "lose", // По умолчанию
-        resultText: log.action.replace("РУЛЕТКА: ", ""),
-        timestamp: Date.now(),
-        vkNotified: true,
-        vkNotificationTime: Date.now()
-    };
-    
-    // Определяем тип результата
-    if (log.action.includes("ВЫИГРЫШ:")) {
-        if (log.action.includes("баллов")) {
-            rouletteData.result = "win_score";
-            // Пытаемся извлечь количество баллов
-            const match = log.action.match(/ВЫИГРЫШ:\s*(\d+)\s*баллов/);
-            if (match) rouletteData.winAmount = parseInt(match[1]);
+        // Определяем тип действия и формируем сообщение
+        if (log.action.includes("КУПИЛ В МАГАЗИНЕ:")) {
+            icon = "🛒";
+            const itemName = log.action.replace("КУПИЛ В МАГАЗИНЕ: ", "");
+            
+            message = `${icon} ПОКУПКА В МАГАЗИНЕ\n\n`;
+            message += `👤 Покупатель: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `📦 Товар: ${itemName}\n`;
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.startsWith("РУЛЕТКА:")) {
+            icon = "🎰";
+            const resultText = log.action.replace("РУЛЕТКА: ", "");
+            
+            message = `${icon} РУЛЕТКА\n\n`;
+            message += `👤 Игрок: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `📊 Результат: ${resultText}\n`;
+            
+            // Пытаемся определить выигрыш
+            if (resultText.includes("ВЫИГРЫШ:")) {
+                icon = "🎉";
+                message = message.replace("🎰", icon);
+                
+                if (resultText.includes("баллов")) {
+                    // Извлекаем количество баллов
+                    const match = resultText.match(/ВЫИГРЫШ:\s*(\d+)\s*баллов/);
+                    if (match) {
+                        const winAmount = parseInt(match[1]);
+                        message += `💰 Выигрыш: ${winAmount} баллов\n`;
+                    }
+                } else {
+                    const itemName = resultText.replace("ВЫИГРЫШ: ", "");
+                    message += `🎁 Выигрыш: ${itemName}\n`;
+                }
+            } else if (resultText.includes("Увы, ничего") || resultText.includes("ничего не выпало")) {
+                icon = "😔";
+                message = message.replace("🎰", icon);
+            }
+            
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Пропуск собрания")) {
+            icon = "⏰";
+            message = `${icon} ПРОПУСК СОБРАНИЯ\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `💰 Списано: 5 баллов\n`;
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Снял выговор себе") || log.action.includes("Снял выговор (админ)")) {
+            icon = "✅";
+            message = `${icon} СНЯТИЕ ВЫГОВОРА\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            
+            if (log.action.includes("Снял выговор себе")) {
+                message += `💰 Списано: 10 баллов\n`;
+            }
+            
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Взял неактив")) {
+            icon = "⏸️";
+            // Извлекаем количество дней
+            const daysMatch = log.action.match(/на (\d+) дн/);
+            const days = daysMatch ? daysMatch[1] : "?";
+            
+            message = `${icon} ВЗЯТИЕ НЕАКТИВА\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `📅 Срок: ${days} дней\n`;
+            message += `💰 Списано: 10 баллов\n`;
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Вышел из неактива")) {
+            icon = "▶️";
+            message = `${icon} ВЫХОД ИЗ НЕАКТИВА\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `💰 Текущий баланс: ${userInfo.score} баллов\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Сменил ник")) {
+            icon = "📛";
+            const newName = log.action.replace("Сменил ник на ", "");
+            
+            message = `${icon} СМЕНА НИКА\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `📛 Новый ник: ${newName}\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Подтвердил почту")) {
+            icon = "📧";
+            message = `${icon} ПОДТВЕРЖДЕНИЕ ПОЧТЫ\n\n`;
+            message += `👤 Пользователь: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `✅ Почта подтверждена\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Выдал выговор")) {
+            icon = "⚠️";
+            message = `${icon} ВЫГОВОР ВЫДАН\n\n`;
+            message += `👤 Модератор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `👮‍♂️ Кем выдан: ${log.by}\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
+        } else if (log.action.includes("Отправил отчет")) {
+            icon = "📝";
+            message = `${icon} НОВЫЙ ОТЧЕТ\n\n`;
+            message += `👤 Автор: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            message += `\nℹ️ Отчет отправлен на проверку`;
+            
+        } else if (log.action.includes("Одобрил заявку") || log.action.includes("Выдал Админку") || 
+                   log.action.includes("Снял Админку") || log.action.includes("Кикнул")) {
+            icon = "👮‍♂️";
+            message = `${icon} АДМИН ДЕЙСТВИЕ\n\n`;
+            message += `👤 Цель: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `🔧 Действие: ${log.action}\n`;
+            message += `👮‍♂️ Админ: ${log.by}\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
+            
         } else {
-            rouletteData.result = "win_item";
-            rouletteData.winItem = log.action.replace("РУЛЕТКА: ВЫИГРЫШ: ", "");
+            // Для всех остальных действий
+            message = `${icon} СИСТЕМНОЕ ДЕЙСТВИЕ\n\n`;
+            message += `👤 Пользователь: ${userInfo.username}\n`;
+            message += `🏢 Должность: ${userInfo.rank}\n`;
+            message += `🔧 Действие: ${log.action}\n`;
+            message += `👮‍♂️ Инициатор: ${log.by}\n`;
+            message += `🕒 Время: ${log.time || new Date().toLocaleString("ru-RU")}\n`;
         }
-    } else if (log.action.includes("ничего не выпало") || log.action.includes("Увы, ничего")) {
-        rouletteData.result = "lose";
-    }
-    
-    // Сохраняем результат рулетки для истории
-    await db.ref(`roulette_spins/${logId}`).set(rouletteData);
-    
-    // Отправляем уведомление о рулетке
-    try {
-        const peerId = await getChatId();
-        if (!peerId) return;
-        
-        const userInfo = await getUserInfo(log.target);
-        
-        let message = `🎰 РУЛЕТКА ИЗ ЛОГОВ\n\n`;
-        message += `👤 Игрок: ${userInfo.username}\n`;
-        message += `🏢 Должность: ${userInfo.rank}\n`;
-        message += `📊 Результат: ${log.action.replace("РУЛЕТКА: ", "")}\n`;
-        message += `🕒 Время: ${new Date(log.time).toLocaleString("ru-RU")}\n`;
-        message += `👤 Инициатор: ${log.by}\n`;
-        
+
+        // Добавляем ссылку на профиль
         message += `\n━━━━━━━━━━━━━━━━━━━\n`;
         message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
-        
+
+        // Отправляем сообщение
         await vk.api.messages.send({
             peer_id: Number(peerId),
             random_id: Math.floor(Math.random() * 2000000000),
             message: message
         });
         
-        console.log(`✅ Уведомление о рулетке из логов отправлено`);
+        console.log(`✅ Уведомление о действии "${log.action}" отправлено`);
         
     } catch (error) {
-        console.error(`❌ Ошибка при обработке лога рулетки:`, error);
+        console.error(`❌ Ошибка при обработке лога ${logId}:`, error);
     }
-});
+}
 
 // =======================
-// ОБРАБОТКА ДРУГИХ ДЕЙСТВИЙ С БАЛЛАМИ
+// ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА И ОБРАБОТКА СТАРЫХ ЛОГОВ
 // =======================
 
-// Отслеживаем другие действия с баллами (пропуск собрания, снятие выговора и т.д.)
-db.ref("logs").on("child_added", async (snap) => {
+// Функция для периодической проверки непрочитанных логов
+async function checkUnprocessedLogs() {
     if (!isBotReady) return;
     
-    const logId = snap.key;
-    const log = snap.val();
-    
-    // Пропускаем логи, которые уже обработаны
-    if (log.vkNotified) return;
-    
-    // Определяем, нужно ли обрабатывать этот лог
-    const actionsToTrack = [
-        "Пропуск собрания",
-        "Снял выговор себе",
-        "Взял неактив",
-        "Вышел из неактива",
-        "Сменил ник",
-        "Подтвердил почту"
-    ];
-    
-    const shouldTrack = actionsToTrack.some(action => log.action && log.action.includes(action));
-    if (!shouldTrack) return;
-    
-    console.log(`[ACTION LOG] Обрабатываю действие: ${logId} - ${log.action}`);
-    
-    // Отправляем уведомление о действии
     try {
-        const peerId = await getChatId();
-        if (!peerId) return;
+        console.log(`[LOG CHECK] Проверяю непрочитанные логи...`);
         
-        const userInfo = await getUserInfo(log.target);
+        const logsSnap = await db.ref("logs").once("value");
+        const logs = logsSnap.val() || {};
         
-        // Определяем иконку для действия
-        let actionIcon = "📝";
-        if (log.action.includes("Пропуск собрания")) actionIcon = "⏰";
-        else if (log.action.includes("выговор")) actionIcon = "⚠️";
-        else if (log.action.includes("неактив
+        let unprocessedCount = 0;
+        
+        for (const [logId, log] of Object.entries(logs)) {
+            // Пропускаем уже обработанные
+            if (processedLogs.has(logId)) continue;
+            if (log.vkProcessed) {
+                processedLogs.add(logId);
+                continue;
+            }
+            
+            unprocessedCount++;
+            
+            // Добавляем в обработанные и обрабатываем
+            processedLogs.add(logId);
+            await db.ref(`logs/${logId}`).update({ vkProcessed: true });
+            
+            // Даем небольшую задержку между обработкой старых логов
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            console.log(`[LOG CHECK] Обрабатываю старый лог: ${logId} - ${log.action || "без действия"}`);
+            await processLogAction(logId, log);
+        }
+        
+        if (unprocessedCount > 0) {
+            console.log(`[LOG CHECK] Обработано ${unprocessedCount} непрочитанных логов`);
+        }
+        
+    } catch (error) {
+        console.error(`[LOG CHECK] Ошибка проверки логов:`, error);
+    }
+}
+
+// Запускаем проверку каждые 5 минут
+setInterval(checkUnprocessedLogs, 5 * 60 * 1000);
+
+// =======================
+// ФИЛЬТРАЦИЯ ЛИШНИХ СООБЩЕНИЙ
+// =======================
+
+setInterval(async () => {
+    if (!isBotReady) return;
+    
+    try {
+        console.log(`[CLEANUP] Проверка на дубликаты отчетов...`);
+        
+        const reportsSnap = await db.ref("reports").orderByChild("processedAt").once("value");
+        const reports = reportsSnap.val() || {};
+        
+        const seenCombinations = new Map();
+        const duplicates = [];
+        
+        for (const [reportId, report] of Object.entries(reports)) {
+            if (report.author && report.date) {
+                const key = `${report.author}_${report.date}_${report.work || ''}`;
+                
+                if (seenCombinations.has(key)) {
+                    const originalId = seenCombinations.get(key);
+                    
+                    if (report.photoCount > 0 && report.processedAt > reports[originalId].processedAt) {
+                        duplicates.push({ duplicateId: reportId, originalId, key });
+                    }
+                } else {
+                    seenCombinations.set(key, reportId);
+                }
+            }
+        }
+        
+        if (duplicates.length > 0) {
+            console.log(`[CLEANUP] Найдено ${duplicates.length} возможных дубликатов`);
+            
+            for (const dup of duplicates) {
+                console.log(`[CLEANUP] Дубликат: ${dup.duplicateId} -> ${dup.originalId} (${dup.key})`);
+                
+                await db.ref(`reports/${dup.duplicateId}`).update({
+                    isDuplicate: true,
+                    duplicateOf: dup.originalId
+                });
+            }
+        }
+        
+    } catch (error) {
+        console.error(`[CLEANUP] Ошибка проверки:`, error);
+    }
+}, 10 * 60 * 1000);
+
+// =======================
+// ЗАПУСК
+// =======================
+
+async function startBot() {
+    try {
+        await initializeExistingData();
+        await vk.updates.start();
+        
+        // Запускаем первоначальную проверку логов через 10 секунд после старта
+        setTimeout(checkUnprocessedLogs, 10000);
+        
+        console.log('🤖 Бот успешно запущен');
+        console.log('📊 Команды: /bind, /id, /info [ник]');
+        console.log('🛒 Отслеживание покупок в магазине');
+        console.log('🎰 Отслеживание рулетки');
+        console.log('📝 Отслеживание всех действий пользователей');
+        console.log('📸 Максимум 10 фото в одном сообщении');
+        console.log('🛡  Защита от дублирования сообщений');
+        
+    } catch (error) {
+        console.error('❌ Ошибка запуска:', error);
+    }
+}
+
+startBot();
+
+// Веб-сервер для проверки
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n📜 Обработано логов: ${processedLogs.size}\n🛒 Отслеживает покупки\n🎰 Отслеживает рулетку`);
+}).listen(process.env.PORT || 3000);
+
+console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
