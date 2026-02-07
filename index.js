@@ -708,7 +708,7 @@ async function processLogAction(logId, log) {
 
         // Добавляем ссылку на профиль
         message += `\n━━━━━━━━━━━━━━━━━━━\n`;
-        message += `🔗 Профиль: ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
+        message += `🔗 Профиль: @ash_ecstasy ${SITE_URL}/#profile?user=${encodeURIComponent(log.target)}`;
 
         // Отправляем сообщение
         await vk.api.messages.send({
@@ -857,3 +857,4 @@ http.createServer((req, res) => {
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
+
