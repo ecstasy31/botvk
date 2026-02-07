@@ -27,6 +27,182 @@ let isBotReady = false;
 console.log("🚀 Бот запускается...");
 
 // =======================
+// ДЛЯ ЗАЩИТЫ ОТ ДУБЛИКАТОВ
+// =======================
+
+// Множества для защиты от дубликатов
+const processedPurchases = new Set();
+const processedReportsForReview = new Set();
+let existingUsers = new Set();
+let existingReports = new Set();
+
+// =======================
+// 1️⃣ УВЕДОМЛЕНИЕ О ПОКУПКЕ В МАГАЗИНЕ
+// =======================
+
+// Обработчик покупок
+db.ref("shop_purchases").on("child_added", async (snap) => {
+    try {
+        const purchaseId = snap.key;
+        const purchase = snap.val();
+        
+        // Защита от дубликатов
+        if (processedPurchases.has(purchaseId)) {
+            console.log(`[SHOP] Покупка ${purchaseId} уже обработана`);
+            return;
+        }
+        
+        // Проверяем обязательные поля
+        if (!purchase.user || !purchase.item || !purchase.price) {
+            console.log(`[SHOP] Некорректные данные покупки ${purchaseId}`);
+            return;
+        }
+        
+        processedPurchases.add(purchaseId);
+        
+        // Получаем ID беседы
+        const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
+        const peerId = peerIdSnap.val();
+        
+        if (!peerId) {
+            console.log("[SHOP] Беседа не привязана (/bind)");
+            return;
+        }
+        
+        // Форматируем время
+        const timestamp = purchase.timestamp || Date.now();
+        const timeStr = new Date(timestamp).toLocaleString("ru-RU");
+        
+        // Формируем сообщение
+        const message = `🛒 ПОКУПКА В МАГАЗИНЕ\n\n` +
+                       `👤 Модератор: ${purchase.user}\n` +
+                       `🎁 Товар: ${purchase.item}\n` +
+                       `💰 Цена: ${purchase.price} баллов\n` +
+                       `🕒 Время: ${timeStr}\n\n` +
+                       `@id713635121(Владелец), выдай товар`;
+        
+        // Отправляем сообщение
+        await vk.api.messages.send({
+            peer_id: Number(peerId),
+            random_id: Math.floor(Math.random() * 2000000000),
+            message: message
+        });
+        
+        console.log(`✅ Уведомление о покупке ${purchaseId} отправлено`);
+        
+        // Помечаем как обработанное (опционально)
+        await db.ref(`shop_purchases/${purchaseId}`).update({
+            botNotified: true,
+            notificationTime: Date.now()
+        });
+        
+    } catch (error) {
+        console.error(`❌ Ошибка обработки покупки:`, error);
+    }
+});
+
+// =======================
+// 2️⃣ АВТО-ОЦЕНКА ОТЧЁТА (ТОЛЬКО ОТЗЫВ)
+// =======================
+
+// Функция анализа отчета
+function analyzeReport(report) {
+    const issues = [];
+    
+    // Проверка длины текста
+    if (!report.work || report.work.length < 50) {
+        issues.push("— Мало описания работы");
+    }
+    
+    // Проверка наличия фото
+    if (!report.imgs || !Array.isArray(report.imgs) || report.imgs.length === 0) {
+        issues.push("— Нет доказательств (фото)");
+    }
+    
+    // Проверка на подозрительные отчеты
+    const score = Number(report.score) || 0;
+    const photoCount = report.imgs ? report.imgs.length : 0;
+    
+    if (score > 8 && photoCount < 2) {
+        issues.push("— Высокие баллы при малом количестве фото");
+    }
+    
+    // Формируем финальный отзыв
+    if (issues.length === 0) {
+        return "✅ Отчёт выглядит качественно и соответствует стандартам";
+    } else {
+        return `⚠️ Замечания:\n${issues.join('\n')}`;
+    }
+}
+
+// Обработчик для авто-оценки
+db.ref("reports").on("child_added", async (snap) => {
+    try {
+        const reportId = snap.key;
+        const report = snap.val();
+        
+        // Защита от дубликатов для авто-оценки
+        if (processedReportsForReview.has(reportId)) {
+            console.log(`[AUTO-REVIEW] Отчет ${reportId} уже обработан`);
+            return;
+        }
+        
+        // Игнорируем старые отчеты (старше 1 часа)
+        const reportTime = report.timestamp || Date.now();
+        if (Date.now() - reportTime > 3600000) {
+            console.log(`[AUTO-REVIEW] Пропускаем старый отчет ${reportId}`);
+            processedReportsForReview.add(reportId);
+            return;
+        }
+        
+        // Проверяем, что отчет в статусе pending
+        if (report.status && report.status !== "pending") {
+            console.log(`[AUTO-REVIEW] Отчет ${reportId} уже проверен`);
+            processedReportsForReview.add(reportId);
+            return;
+        }
+        
+        processedReportsForReview.add(reportId);
+        
+        // Получаем ID беседы
+        const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
+        const peerId = peerIdSnap.val();
+        
+        if (!peerId) {
+            console.log("[AUTO-REVIEW] Беседа не привязана");
+            return;
+        }
+        
+        // Анализ отчета
+        const feedback = analyzeReport(report);
+        
+        // Формируем отзыв
+        const message = `🧠 АВТО-АНАЛИЗ ОТЧЕТА\n\n` +
+                       `👤 Ник: ${report.author || "Не указан"}\n` +
+                       `📊 Баллы: ${report.score || 0}\n\n` +
+                       `${feedback}`;
+        
+        // Отправляем отзыв отдельным сообщением
+        await vk.api.messages.send({
+            peer_id: Number(peerId),
+            random_id: Math.floor(Math.random() * 2000000000),
+            message: message
+        });
+        
+        console.log(`✅ Авто-отзыв для отчета ${reportId} отправлен`);
+        
+        // Помечаем как обработанный
+        await db.ref(`reports/${reportId}`).update({
+            autoReviewed: true,
+            autoReviewTime: Date.now()
+        });
+        
+    } catch (error) {
+        console.error(`❌ Ошибка авто-оценки:`, error);
+    }
+});
+
+// =======================
 // КОМАНДЫ
 // =======================
 
@@ -242,9 +418,6 @@ async function getChatId() {
 // ИНИЦИАЛИЗАЦИЯ ДАННЫХ
 // =======================
 
-let existingUsers = new Set();
-let existingReports = new Set();
-
 async function initializeExistingData() {
     console.log("[INIT] Загружаю существующие данные...");
     
@@ -257,6 +430,18 @@ async function initializeExistingData() {
     const reports = reportsSnap.val() || {};
     existingReports = new Set(Object.keys(reports));
     console.log(`[INIT] Загружено отчетов: ${existingReports.size}`);
+    
+    // Загружаем уже обработанные покупки
+    const purchasesSnap = await db.ref("shop_purchases").once("value");
+    const purchases = purchasesSnap.val() || {};
+    Object.keys(purchases).forEach(id => processedPurchases.add(id));
+    console.log(`[INIT] Загружено покупок: ${processedPurchases.size}`);
+    
+    // Загружаем уже обработанные отчеты для авто-оценки
+    Object.entries(reports).forEach(([id, report]) => {
+        if (report.autoReviewed) processedReportsForReview.add(id);
+    });
+    console.log(`[INIT] Загружено авто-оцененных отчетов: ${processedReportsForReview.size}`);
     
     isBotReady = true;
     console.log("[INIT] Бот готов к работе!");
@@ -325,7 +510,7 @@ async function processNewUser(userId, userData) {
     } catch (error) {
         console.error(`❌ Ошибка:`, error);
     }
-}
+});
 
 // =======================
 // ОБРАБОТКА НОВЫХ ОТЧЕТОВ (ИСПРАВЛЕНО - не кидает отдельные сообщения)
@@ -503,9 +688,6 @@ async function processNewReport(reportId, report) {
 // ФИЛЬТРАЦИЯ ЛИШНИХ СООБЩЕНИЙ (ЗАЩИТА ОТ СПАМА)
 // =======================
 
-// Отключаем функцию восстановления фото, которая создавала отдельные сообщения
-// Вместо нее добавляем проверку на дублирование
-
 setInterval(async () => {
     if (!isBotReady) return;
     
@@ -555,6 +737,27 @@ setInterval(async () => {
     }
 }, 10 * 60 * 1000); // Проверка каждые 10 минут
 
+// Периодическая очистка множеств (чтобы не росло бесконечно)
+setInterval(() => {
+    const hourAgo = Date.now() - 3600000;
+    
+    // Очищаем processedPurchases
+    for (const purchaseId of processedPurchases) {
+        // В реальном коде здесь была бы проверка времени,
+        // но т.к. у нас только Set, просто ограничим размер
+        if (processedPurchases.size > 1000) {
+            processedPurchases.delete(purchaseId);
+        }
+    }
+    
+    // Очищаем processedReportsForReview
+    for (const reportId of processedReportsForReview) {
+        if (processedReportsForReview.size > 1000) {
+            processedReportsForReview.delete(reportId);
+        }
+    }
+}, 3600000); // Каждый час
+
 // =======================
 // ЗАПУСК
 // =======================
@@ -566,7 +769,9 @@ async function startBot() {
         
         console.log('🤖 Бот успешно запущен');
         console.log('📊 Команды: /bind, /id, /info [ник]');
-        console.log('⚠️  Исправлено: фото отправляются только в основном сообщении отчета');
+        console.log('🛒 Уведомления о покупках: ВКЛЮЧЕНО');
+        console.log('🧠 Авто-анализ отчетов: ВКЛЮЧЕНО');
+        console.log('⚠️  Фото отправляются только в основном сообщении отчета');
         console.log('📸 Максимум 10 фото в одном сообщении');
         console.log('🛡  Защита от дублирования сообщений с фото');
         
@@ -580,7 +785,7 @@ startBot();
 // Веб-сервер для проверки
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n⚠️  Фото только в основном сообщении`);
+    res.end(`✅ Бот работает\n📊 Пользователей: ${existingUsers.size}\n📝 Отчетов: ${existingReports.size}\n🛒 Обработано покупок: ${processedPurchases.size}\n🧠 Авто-оценок: ${processedReportsForReview.size}`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
