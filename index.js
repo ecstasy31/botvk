@@ -37,11 +37,11 @@ let existingUsers = new Set();
 let existingReports = new Set();
 
 // =======================
-// 1️⃣ УВЕДОМЛЕНИЕ О ПОКУПКЕ В МАГАЗИНЕ
+// 1️⃣ УВЕДОМЛЕНИЕ О ПОКУПКЕ В МАГАЗИНЕ - ИСПРАВЛЕННАЯ
 // =======================
 
-// Обработчик покупок
-db.ref("shop_purchases").on("child_added", async (snap) => {
+// Обработчик покупок - ИСПРАВЛЕНО: используем shop_items_log вместо shop_purchases
+db.ref("shop_items_log").on("child_added", async (snap) => {
     try {
         const purchaseId = snap.key;
         const purchase = snap.val();
@@ -54,7 +54,7 @@ db.ref("shop_purchases").on("child_added", async (snap) => {
         
         // Проверяем обязательные поля
         if (!purchase.user || !purchase.item || !purchase.price) {
-            console.log(`[SHOP] Некорректные данные покупки ${purchaseId}`);
+            console.log(`[SHOP] Некорректные данные покупки ${purchaseId}:`, purchase);
             return;
         }
         
@@ -73,25 +73,25 @@ db.ref("shop_purchases").on("child_added", async (snap) => {
         const timestamp = purchase.timestamp || Date.now();
         const timeStr = new Date(timestamp).toLocaleString("ru-RU");
         
-        // Формируем сообщение
+        // Формируем сообщение - ИСПРАВЛЕНО: правильное упоминание
         const message = `🛒 ПОКУПКА В МАГАЗИНЕ\n\n` +
                        `👤 Модератор: ${purchase.user}\n` +
                        `🎁 Товар: ${purchase.item}\n` +
                        `💰 Цена: ${purchase.price} баллов\n` +
                        `🕒 Время: ${timeStr}\n\n` +
-                       `@id713635121(Владелец), выдай товар`;
+                       `@id713635121 (Владелец), выдай товар`;
         
-        // Отправляем сообщение
+        // Отправляем сообщение - ИСПРАВЛЕНО: правильный peer_id
         await vk.api.messages.send({
             peer_id: Number(peerId),
             random_id: Math.floor(Math.random() * 2000000000),
             message: message
         });
         
-        console.log(`✅ Уведомление о покупке ${purchaseId} отправлено`);
+        console.log(`✅ Уведомление о покупке ${purchaseId} отправлено в беседу ${peerId}`);
         
         // Помечаем как обработанное (опционально)
-        await db.ref(`shop_purchases/${purchaseId}`).update({
+        await db.ref(`shop_items_log/${purchaseId}`).update({
             botNotified: true,
             notificationTime: Date.now()
         });
@@ -102,7 +102,7 @@ db.ref("shop_purchases").on("child_added", async (snap) => {
 });
 
 // =======================
-// 2️⃣ АВТО-ОЦЕНКА ОТЧЁТА (ТОЛЬКО ОТЗЫВ)
+// 2️⃣ АВТО-ОЦЕНКА ОТЧЁТА - ИСПРАВЛЕННАЯ
 // =======================
 
 // Функция анализа отчета
@@ -135,7 +135,7 @@ function analyzeReport(report) {
     }
 }
 
-// Обработчик для авто-оценки
+// Обработчик для авто-оценки - ИСПРАВЛЕНО: отдельный listener для авто-оценки
 db.ref("reports").on("child_added", async (snap) => {
     try {
         const reportId = snap.key;
@@ -162,6 +162,13 @@ db.ref("reports").on("child_added", async (snap) => {
             return;
         }
         
+        // Дополнительная проверка: должен быть автор и баллы
+        if (!report.author || typeof report.score === 'undefined') {
+            console.log(`[AUTO-REVIEW] Пропускаем некорректный отчет ${reportId}`);
+            processedReportsForReview.add(reportId);
+            return;
+        }
+        
         processedReportsForReview.add(reportId);
         
         // Получаем ID беседы
@@ -182,14 +189,14 @@ db.ref("reports").on("child_added", async (snap) => {
                        `📊 Баллы: ${report.score || 0}\n\n` +
                        `${feedback}`;
         
-        // Отправляем отзыв отдельным сообщением
+        // Отправляем отзыв отдельным сообщением - ИСПРАВЛЕНО: правильный peer_id
         await vk.api.messages.send({
             peer_id: Number(peerId),
             random_id: Math.floor(Math.random() * 2000000000),
             message: message
         });
         
-        console.log(`✅ Авто-отзыв для отчета ${reportId} отправлен`);
+        console.log(`✅ Авто-отзыв для отчета ${reportId} отправлен в беседу ${peerId}`);
         
         // Помечаем как обработанный
         await db.ref(`reports/${reportId}`).update({
@@ -260,6 +267,27 @@ vk.updates.on("message_new", async (ctx) => {
                 .inline()
                 .urlButton({ label: "🌍 Открыть в таблице", url: personalUrl })
         });
+    }
+
+    // Команда для теста покупки
+    if (text === "/test_purchase") {
+        const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
+        const peerId = peerIdSnap.val();
+        
+        if (!peerId) {
+            return ctx.send("Сначала привяжите беседу через /bind");
+        }
+        
+        // Создаем тестовую покупку
+        const testPurchase = {
+            user: "TestUser",
+            item: "Пропуск смены",
+            price: 50,
+            timestamp: Date.now()
+        };
+        
+        await db.ref("shop_items_log").push(testPurchase);
+        return ctx.send("✅ Тестовая покупка создана. Проверьте беседу.");
     }
 });
 
@@ -431,17 +459,22 @@ async function initializeExistingData() {
     existingReports = new Set(Object.keys(reports));
     console.log(`[INIT] Загружено отчетов: ${existingReports.size}`);
     
-    // Загружаем уже обработанные покупки
-    const purchasesSnap = await db.ref("shop_purchases").once("value");
+    // Загружаем уже обработанные покупки ИСПРАВЛЕНО: shop_items_log
+    const purchasesSnap = await db.ref("shop_items_log").once("value");
     const purchases = purchasesSnap.val() || {};
     Object.keys(purchases).forEach(id => processedPurchases.add(id));
-    console.log(`[INIT] Загружено покупок: ${processedPurchases.size}`);
+    console.log(`[INIT] Загружено покупок (shop_items_log): ${processedPurchases.size}`);
     
     // Загружаем уже обработанные отчеты для авто-оценки
     Object.entries(reports).forEach(([id, report]) => {
         if (report.autoReviewed) processedReportsForReview.add(id);
     });
     console.log(`[INIT] Загружено авто-оцененных отчетов: ${processedReportsForReview.size}`);
+    
+    // Проверяем привязку беседы
+    const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
+    const peerId = peerIdSnap.val();
+    console.log(`[INIT] Привязанная беседа: ${peerId || "НЕТ (используй /bind)"}`);
     
     isBotReady = true;
     console.log("[INIT] Бот готов к работе!");
@@ -513,7 +546,7 @@ async function processNewUser(userId, userData) {
 });
 
 // =======================
-// ОБРАБОТКА НОВЫХ ОТЧЕТОВ (ИСПРАВЛЕНО - не кидает отдельные сообщения)
+// ОБРАБОТКА НОВЫХ ОТЧЕТОВ
 // =======================
 
 db.ref("reports").on("child_added", async (snap) => {
@@ -737,23 +770,23 @@ setInterval(async () => {
     }
 }, 10 * 60 * 1000); // Проверка каждые 10 минут
 
-// Периодическая очистка множеств (чтобы не росло бесконечно)
+// Периодическая очистка множеств
 setInterval(() => {
-    const hourAgo = Date.now() - 3600000;
-    
-    // Очищаем processedPurchases
-    for (const purchaseId of processedPurchases) {
-        // В реальном коде здесь была бы проверка времени,
-        // но т.к. у нас только Set, просто ограничим размер
-        if (processedPurchases.size > 1000) {
-            processedPurchases.delete(purchaseId);
+    // Очищаем processedPurchases если слишком много
+    if (processedPurchases.size > 1000) {
+        console.log(`[CLEANUP] Очищаем processedPurchases (было: ${processedPurchases.size})`);
+        const array = Array.from(processedPurchases);
+        for (let i = 0; i < array.length - 500; i++) {
+            processedPurchases.delete(array[i]);
         }
     }
     
-    // Очищаем processedReportsForReview
-    for (const reportId of processedReportsForReview) {
-        if (processedReportsForReview.size > 1000) {
-            processedReportsForReview.delete(reportId);
+    // Очищаем processedReportsForReview если слишком много
+    if (processedReportsForReview.size > 1000) {
+        console.log(`[CLEANUP] Очищаем processedReportsForReview (было: ${processedReportsForReview.size})`);
+        const array = Array.from(processedReportsForReview);
+        for (let i = 0; i < array.length - 500; i++) {
+            processedReportsForReview.delete(array[i]);
         }
     }
 }, 3600000); // Каждый час
@@ -768,8 +801,8 @@ async function startBot() {
         await vk.updates.start();
         
         console.log('🤖 Бот успешно запущен');
-        console.log('📊 Команды: /bind, /id, /info [ник]');
-        console.log('🛒 Уведомления о покупках: ВКЛЮЧЕНО');
+        console.log('📊 Команды: /bind, /id, /info [ник], /test_purchase');
+        console.log('🛒 Уведомления о покупках: ВКЛЮЧЕНО (слушает shop_items_log)');
         console.log('🧠 Авто-анализ отчетов: ВКЛЮЧЕНО');
         console.log('⚠️  Фото отправляются только в основном сообщении отчета');
         console.log('📸 Максимум 10 фото в одном сообщении');
