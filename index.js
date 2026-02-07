@@ -75,7 +75,7 @@ async function initializeExistingData() {
 }
 
 // =======================
-// 1️⃣ УВЕДОМЛЕНИЕ О ПОКУПКЕ В МАГАЗИНЕ
+// 1️⃣ УВЕДОМЛЕНИЕ О ПОКУПКЕ В МАГАЗИНЕ (ИСПРАВЛЕНО)
 // =======================
 
 db.ref("shop_purchases").on("child_added", async (snap) => {
@@ -90,7 +90,7 @@ db.ref("shop_purchases").on("child_added", async (snap) => {
         return;
     }
     
-    console.log(`[SHOP] Обрабатываю покупку: ${purchaseId}`);
+    console.log(`[SHOP] Обрабатываю покупку: ${purchaseId}`, JSON.stringify(purchase, null, 2));
     await processPurchase(purchaseId, purchase);
 });
 
@@ -104,6 +104,19 @@ async function processPurchase(purchaseId, purchase) {
             return;
         }
         
+        // Получаем имя пользователя по ID
+        let userName = "Неизвестный пользователь";
+        if (purchase.userId) {
+            try {
+                const [userData] = await vk.api.users.get({ user_ids: [purchase.userId] });
+                if (userData) {
+                    userName = `${userData.first_name} ${userData.last_name}`;
+                }
+            } catch (userError) {
+                console.log(`[SHOP] Не удалось получить имя пользователя: ${userError.message}`);
+            }
+        }
+        
         // Форматируем время
         const time = purchase.timestamp 
             ? new Date(purchase.timestamp).toLocaleString("ru-RU", {
@@ -115,16 +128,18 @@ async function processPurchase(purchaseId, purchase) {
             })
             : new Date().toLocaleString("ru-RU");
         
-        // Форматируем сообщение
+        // Форматируем сообщение (ИСПРАВЛЕНО)
         const message = 
             `🛒 ПОКУПКА В МАГАЗИНЕ\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `👤 Модератор: [id713635121|${purchase.user || "Неизвестно"}]\n` +
+            `👤 Модератор: ${userName} (ID: ${purchase.userId || "неизвестен"})\n` +
             `🎁 Товар: ${purchase.item || "Неизвестно"}\n` +
             `💰 Стоимость: ${purchase.price || 0} баллов\n` +
             `🕐 Время: ${time}\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `✅ Покупка зафиксирована в системе`;
+        
+        console.log(`[SHOP] Отправляю сообщение:`, message);
         
         await vk.api.messages.send({
             peer_id: Number(peerId),
@@ -147,7 +162,7 @@ async function processPurchase(purchaseId, purchase) {
 }
 
 // =======================
-// 2️⃣ УВЕДОМЛЕНИЕ О РУЛЕТКЕ
+// 2️⃣ УВЕДОМЛЕНИЕ О РУЛЕТКЕ (ИСПРАВЛЕНО)
 // =======================
 
 db.ref("roulette_spins").on("child_added", async (snap) => {
@@ -162,7 +177,7 @@ db.ref("roulette_spins").on("child_added", async (snap) => {
         return;
     }
     
-    console.log(`[ROULETTE] Обрабатываю спин: ${spinId}`);
+    console.log(`[ROULETTE] Обрабатываю спин: ${spinId}`, JSON.stringify(spin, null, 2));
     await processRouletteSpin(spinId, spin);
 });
 
@@ -174,6 +189,19 @@ async function processRouletteSpin(spinId, spin) {
         if (!peerId) {
             console.error(`[ROULETTE] Беседа не привязана!`);
             return;
+        }
+        
+        // Получаем имя пользователя по ID
+        let userName = "Неизвестный игрок";
+        if (spin.userId) {
+            try {
+                const [userData] = await vk.api.users.get({ user_ids: [spin.userId] });
+                if (userData) {
+                    userName = `${userData.first_name} ${userData.last_name}`;
+                }
+            } catch (userError) {
+                console.log(`[ROULETTE] Не удалось получить имя пользователя: ${userError.message}`);
+            }
         }
         
         // Форматируем время
@@ -189,19 +217,29 @@ async function processRouletteSpin(spinId, spin) {
         
         // Определяем иконку результата
         let resultIcon = "🎰";
-        if (spin.result && spin.result.includes("ВЫИГРЫШ")) resultIcon = "🎁";
-        if (spin.result && spin.result.includes("НИЧЕГО")) resultIcon = "❌";
+        let resultText = spin.result || "Не определен";
         
-        // Форматируем сообщение
+        if (spin.result) {
+            const lowerResult = spin.result.toLowerCase();
+            if (lowerResult.includes("выигрыш") || lowerResult.includes("приз")) {
+                resultIcon = "🎁";
+            } else if (lowerResult.includes("ничего") || lowerResult.includes("проигрыш")) {
+                resultIcon = "❌";
+            }
+        }
+        
+        // Форматируем сообщение (ИСПРАВЛЕНО)
         const message = 
             `${resultIcon} РЕЗУЛЬТАТ РУЛЕТКИ\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `👤 Игрок: [id713635121|${spin.user || "Неизвестно"}]\n` +
-            `🎯 Результат: ${spin.result || "Не определен"}\n` +
+            `👤 Игрок: ${userName} (ID: ${spin.userId || "неизвестен"})\n` +
+            `🎯 Результат: ${resultText}\n` +
             `💰 Стоимость спина: ${spin.cost || 15} баллов\n` +
             `🕐 Время: ${time}\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `🎉 Удачи в следующий раз!`;
+        
+        console.log(`[ROULETTE] Отправляю сообщение:`, message);
         
         await vk.api.messages.send({
             peer_id: Number(peerId),
@@ -224,12 +262,12 @@ async function processRouletteSpin(spinId, spin) {
 }
 
 // =======================
-// 3️⃣ АВТО-ОЦЕНКА ОТЧЁТА (ВМЕСТЕ С СООБЩЕНИЕМ)
+// 3️⃣ УПРОЩЕННЫЙ АВТО-АНАЛИЗ ОТЧЁТА
 // =======================
 
 function generateAutoReview(report) {
+    // Простой анализ без излишеств
     const remarks = [];
-    const recommendations = [];
     
     // Базовые метрики
     const textLength = report.work ? report.work.trim().length : 0;
@@ -237,78 +275,48 @@ function generateAutoReview(report) {
     const score = Number(report.score) || 0;
     const punishments = Number(report.punishments) || 0;
     
-    // Анализ текста
-    if (textLength < 50) {
-        remarks.push("📉 Слишком краткое описание работы");
-        recommendations.push("Детально опишите проделанную работу");
-    } else if (textLength < 100) {
-        remarks.push("📝 Описание можно дополнить");
-        recommendations.push("Добавьте больше деталей о работе");
-    } else if (textLength > 500) {
-        remarks.push("📋 Описание слишком объемное");
-        recommendations.push("Сократите до ключевых моментов");
+    // Проверки
+    if (textLength < 30) {
+        remarks.push("• Слишком краткое описание");
     }
     
-    // Анализ фото
     if (photoCount === 0) {
-        remarks.push("📸 Отсутствуют доказательства");
-        recommendations.push("Прикрепите скриншоты нарушений");
+        remarks.push("• Нет скриншотов");
     } else if (photoCount === 1) {
-        remarks.push("📷 Мало доказательств");
-        recommendations.push("Добавьте больше скриншотов");
-    } else if (photoCount >= 3) {
-        remarks.push("✅ Достаточно доказательств");
+        remarks.push("• Мало доказательств (1 фото)");
     }
     
-    // Анализ наказаний и баллов
     if (punishments > 0 && score === 0) {
-        remarks.push("⚠️ Наказания есть, но баллов нет");
-        recommendations.push("Укажите баллы за наказания");
+        remarks.push("• Есть наказания, но нет баллов");
     }
     
-    if (score > 8 && photoCount < 2) {
-        remarks.push("🔍 Высокий балл при малом количестве доказательств");
-        recommendations.push("Добавьте больше скриншотов для подтверждения");
-    }
-    
-    if (punishments > 10 && photoCount < 3) {
-        remarks.push("⚖️ Много наказаний, мало доказательств");
-        recommendations.push("Увеличьте количество скриншотов");
-    }
-    
-    // Качество работы
-    if (textLength >= 100 && photoCount >= 2 && punishments > 0) {
-        remarks.push("✅ Качественный отчет");
+    if (score > 5 && textLength < 50) {
+        remarks.push("• Высокий балл при кратком описании");
     }
     
     // Формируем отзыв
-    let review = "🧠 АВТО-АНАЛИЗ ОТЧЁТА\n";
+    let review = "🧠 АВТО-АНАЛИЗ\n";
     review += "━━━━━━━━━━━━━━━━━━\n";
-    review += `📊 Общая оценка: ${score} баллов\n`;
-    review += `📝 Длина текста: ${textLength} символов\n`;
-    review += `📎 Приложено фото: ${photoCount} шт.\n`;
-    review += `⚖️ Наказаний: ${punishments}\n\n`;
     
     if (remarks.length > 0) {
-        review += "⚠️ Замечания:\n";
-        remarks.forEach(r => review += `• ${r}\n`);
-        review += "\n💡 Рекомендации:\n";
-        recommendations.forEach(r => review += `• ${r}\n`);
+        review += "⚠️ Внимание:\n";
+        review += remarks.join('\n');
     } else {
-        review += "✅ Отчёт соответствует всем стандартам качества!\n";
-        review += "📋 Полное описание работы\n";
-        review += "📎 Достаточно доказательств\n";
-        review += "⚖️ Адекватные наказания";
+        review += "✅ Отчёт соответствует требованиям\n";
     }
     
-    review += "\n━━━━━━━━━━━━━━━━━━\n";
-    review += "ℹ️ Это автоматический анализ. Финальное решение - за проверяющим.";
+    review += `\n📊 Показатели:\n`;
+    review += `• Длина: ${textLength} симв.\n`;
+    review += `• Фото: ${photoCount} шт.\n`;
+    review += `• Наказаний: ${punishments}\n`;
+    review += `• Баллов: ${score}`;
     
+    review += "\n━━━━━━━━━━━━━━━━━━";
     return review;
 }
 
 // =======================
-// ОБРАБОТКА ОТЧЕТОВ С АВТО-ОЦЕНКОЙ
+// ОБРАБОТКА ОТЧЕТОВ
 // =======================
 
 db.ref("reports").on("child_added", async (snap) => {
@@ -329,7 +337,7 @@ db.ref("reports").on("child_added", async (snap) => {
         return;
     }
     
-    console.log(`[REPORT] Обрабатываю отчет ${reportId} с авто-оценкой`);
+    console.log(`[REPORT] Обрабатываю отчет ${reportId}`, JSON.stringify(report, null, 2));
     await processReportWithReview(reportId, report);
 });
 
@@ -346,17 +354,16 @@ async function processReportWithReview(reportId, report) {
         // Генерируем авто-оценку
         const autoReview = generateAutoReview(report);
         
-        // Основное сообщение отчета
+        // Основное сообщение отчета (упрощенное)
         const reportText = 
             `📝 НОВЫЙ ОТЧЕТ\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `👤 Ник: ${report.author || "—"}\n` +
             `🔰 Должность: ${report.role || "—"}\n` +
             `📅 Дата: ${report.date || "—"}\n\n` +
-            `🛠 Работа: ${report.work || "—"}\n` +
+            `${autoReview}\n\n` +
             `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
-            `📊 Баллы: ${report.score || 0}\n\n` +
-            `${autoReview}`;
+            `📊 Баллы: ${report.score || 0}`;
         
         // Обрабатываем фото
         const attachments = [];
@@ -418,7 +425,7 @@ async function processReportWithReview(reportId, report) {
             keyboard: keyboard
         });
         
-        console.log(`✅ Отчет ${reportId} отправлен с авто-оценкой`);
+        console.log(`✅ Отчет ${reportId} отправлен`);
         
         // Сохраняем данные
         await db.ref(`reports/${reportId}`).update({
@@ -436,9 +443,9 @@ async function processReportWithReview(reportId, report) {
     } catch (error) {
         console.error(`❌ Ошибка отчета ${reportId}:`, error);
         
-        // Если ошибка из-за длины сообщения, пробуем отправить без авто-оценки
+        // Если ошибка из-за длины сообщения, отправляем еще более краткую версию
         if (error.code === 914 || error.message.includes('too long')) {
-            console.log(`[REPORT] Отправляю отчет ${reportId} без авто-оценки`);
+            console.log(`[REPORT] Отправляю краткий отчет ${reportId}`);
             
             const shortText = 
                 `📝 НОВЫЙ ОТЧЕТ\n` +
@@ -446,7 +453,7 @@ async function processReportWithReview(reportId, report) {
                 `👤 Ник: ${report.author || "—"}\n` +
                 `📊 Баллы: ${report.score || 0}\n` +
                 `📎 Фото: ${report.imgs?.length || 0} шт.\n` +
-                `⚠️ Авто-анализ не поместился в сообщение`;
+                `⚠️ Подробности в системе`;
             
             const keyboard = Keyboard.builder()
                 .inline()
@@ -540,7 +547,7 @@ vk.updates.on("message_new", async (ctx) => {
         });
     }
     
-    // Новая команда для проверки модулей
+    // Команда для проверки модулей
     if (text === "/status") {
         const statusMessage = 
             `🤖 СТАТУС БОТА\n` +
@@ -549,7 +556,28 @@ vk.updates.on("message_new", async (ctx) => {
             `🎰 Обработано рулетки: ${processedRoulette.size}\n` +
             `📝 Обработано отчетов: ${processedReports.size}\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `✅ Все системы работают`;
+            `📡 Проверка работы...\n\n`;
+        
+        // Проверяем активность в реальном времени
+        const testPromises = [
+            db.ref("shop_purchases").limitToLast(1).once("value"),
+            db.ref("roulette_spins").limitToLast(1).once("value"),
+            db.ref("reports").limitToLast(1).once("value")
+        ];
+        
+        try {
+            const results = await Promise.all(testPromises);
+            const [lastPurchase, lastRoulette, lastReport] = results;
+            
+            statusMessage += `🛒 Последняя покупка: ${lastPurchase.exists() ? 'есть' : 'нет'}\n`;
+            statusMessage += `🎰 Последняя рулетка: ${lastRoulette.exists() ? 'есть' : 'нет'}\n`;
+            statusMessage += `📝 Последний отчет: ${lastReport.exists() ? 'есть' : 'нет'}\n`;
+            statusMessage += `━━━━━━━━━━━━━━━━━━\n`;
+            statusMessage += `✅ Все системы работают`;
+            
+        } catch (error) {
+            statusMessage += `❌ Ошибка проверки: ${error.message}`;
+        }
         
         return ctx.send(statusMessage);
     }
@@ -592,12 +620,11 @@ vk.updates.on("message_event", async (ctx) => {
         const autoReview = report.autoReview ? `\n\n${report.autoReview}` : "";
         
         const newText = 
-            `📝 ОТЧЕТ ${isApproved ? 'ОДОБРЕН' : 'ОТКЛОНЕН'}\n\n` +
+            `📝 ОТЧЕТ ${isApproved ? 'ОДОБРЕН' : 'ОТКЛОНЕН'}\n` +
+            `━━━━━━━━━━━━━━━━━━\n` +
             `👤 Ник: ${report.author || "—"}\n` +
             `🔰 Должность: ${report.role || "—"}\n` +
-            `📅 Дата: ${report.date || "—"}\n\n` +
-            `🛠 Работа: ${report.work || "—"}\n` +
-            `⚖️ Наказания: ${report.punishments || "Нет"}\n` +
+            `📅 Дата: ${report.date || "—"}\n` +
             `📊 Баллы: ${report.score || 0}\n\n` +
             `${autoReview}\n\n` +
             `${statusIcon}\n👤 Проверил: ${adminName}`;
@@ -654,15 +681,6 @@ vk.updates.on("message_event", async (ctx) => {
 });
 
 // =======================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// =======================
-
-async function getChatId() {
-    const peerIdSnap = await db.ref("settings/chatPeerId").once("value");
-    return peerIdSnap.val();
-}
-
-// =======================
 // ЗАПУСК БОТА
 // =======================
 
@@ -674,7 +692,7 @@ async function startBot() {
         console.log('🤖 Бот успешно запущен');
         console.log('🛒 Модуль покупок: АКТИВЕН');
         console.log('🎰 Модуль рулетки: АКТИВЕН');
-        console.log('🧠 Модуль авто-оценки: АКТИВЕН (встроен в отчеты)');
+        console.log('🧠 Модуль авто-анализа: АКТИВЕН (упрощенный)');
         console.log('📊 Команды: /bind, /id, /info [ник], /status');
         
     } catch (error) {
@@ -687,7 +705,7 @@ startBot();
 // Веб-сервер для проверки
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`✅ Бот работает\n🛒 Покупок: ${processedPurchases.size}\n🎰 Рулетка: ${processedRoulette.size}\n📝 Отчетов: ${processedReports.size}\n🧠 Авто-оценка встроена в отчеты`);
+    res.end(`✅ Бот работает\n🛒 Покупок: ${processedPurchases.size}\n🎰 Рулетка: ${processedRoulette.size}\n📝 Отчетов: ${processedReports.size}\n🧠 Авто-анализ упрощен`);
 }).listen(process.env.PORT || 3000);
 
 console.log(`🌐 Сервер на порту ${process.env.PORT || 3000}`);
